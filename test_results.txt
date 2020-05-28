@@ -1,0 +1,14 @@
+SimpleAI success 
+ReiwaThunder success 
+JayBot_GM success 
+HaibuAI success 
+FalzAI success 
+Dora success 
+LGIST_Bot success 
+DiceAI success 
+TOVOR success 
+UtalFighter success 
+BCP success 
+Toothless success 
+MctsAi success 
+KotlinTestAgent success
