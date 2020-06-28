@@ -2,6 +2,7 @@ import gym
 import gym_fightingice
 import random
 import collections
+import signal, functools
 import torch
 import argparse
 import copy
@@ -30,7 +31,7 @@ c = 0.75  # For truncating importance sampling ratio
 parser = argparse.ArgumentParser(description='ACER')
 parser.add_argument('--seed', type=int, default=123, help='Random seed')
 parser.add_argument('--cuda', type=bool, default=True, help='cuda Device')
-parser.add_argument('--num-processes', type=int, default=4, metavar='N', help='Number of training async agents (does not include single validation agent)')
+parser.add_argument('--num-processes', type=int, default=6, metavar='N', help='Number of training async agents (does not include single validation agent)')
 parser.add_argument('--T-max', type=int, default=10e7, metavar='STEPS', help='Number of training steps')
 parser.add_argument('--t-max', type=int, default=300, metavar='STEPS', help='Max number of forward steps for A3C before update')
 parser.add_argument('--max-episode-length', type=int, default=1000, metavar='LENGTH', help='Maximum episode length')
@@ -44,7 +45,7 @@ parser.add_argument('--replay-ratio', type=int, default=4, metavar='r', help='Ra
 parser.add_argument('--replay_start', type=int, default=1000, metavar='EPISODES', help='Number of transitions to save before starting off-policy training')
 parser.add_argument('--discount', type=float, default=0.99, metavar='γ', help='Discount factor')
 parser.add_argument('--trace-decay', type=float, default=1, metavar='λ', help='Eligibility trace decay factor')
-parser.add_argument('--trace-max', type=float, default=10, metavar='c', help='Importance weight truncation (max) value')
+parser.add_argument('--trace-max', type=float, default=5, metavar='c', help='Importance weight truncation (max) value')
 parser.add_argument('--trust-region', action='store_true', help='Use trust region')
 parser.add_argument('--trust-region-decay', type=float, default=0.99, metavar='α', help='Average model weight decay rate')
 parser.add_argument('--trust-region-threshold', type=float, default=1, metavar='δ', help='Trust region threshold value')
@@ -103,44 +104,44 @@ class ReplayBuffer():
 
 
 class ActorCritic(nn.Module):
-    def __init__(self, observation_space, action_space, hidden_size):
+    def __init__(self,observation_space, action_space, hidden_size):
         super(ActorCritic, self).__init__()
         self.state_size = observation_space.shape[0]
         self.action_size = action_space.n
-
         self.fc1 = nn.Linear(self.state_size, hidden_size)
-        self.lstm = nn.LSTMCell(hidden_size, hidden_size)
-        self.fc_actor1 = nn.Linear(hidden_size, hidden_size)
-        self.fc_critic1 = nn.Linear(hidden_size, hidden_size)
-        self.fc_critic = nn.Linear(hidden_size, self.action_size)
-        self.fc_actor = nn.Linear(hidden_size, self.action_size)
-        self.hx = torch.zeros(1, args.hidden_size)
-        self.cx = torch.zeros(1, args.hidden_size)
+        self.fc2 = nn.Linear(hidden_size, hidden_size)
+        self.fc_pi = nn.Linear(hidden_size, self.action_size)
+        self.fc_q = nn.Linear(hidden_size, self.action_size)
 
-    def pi(self, x,softmax_dim=0):
-            x = F.relu(self.fc1(x))
-            h = self.lstm(x, (self.hx, self.cx))  # h is (hidden state, cell state)
-            x = h[0]
-            policy = F.softmax(self.fc_actor(F.relu(self.fc_actor1(x))), dim=1).clamp(
-                max=1 - 1e-20)  # Prevent 1s and hence NaNs
-            return policy
+    def pi(self, x, softmax_dim=0):
+        x = F.relu(self.fc2(F.relu(self.fc1(x))))
+        x = self.fc_pi(x)
+        pi = F.softmax(x, dim=softmax_dim)
+        return pi
 
     def q(self, x):
-            x = F.relu(self.fc1(x))
-            h = self.lstm(x, (self.hx, self.cx))  # h is (hidden state, cell state)
-            x = h[0]
-            Q = self.fc_critic(F.relu(self.fc_critic1(x)))
-            return Q
+        x = F.relu(self.fc2(F.relu(self.fc1(x))))
+        q = self.fc_q(x)
+        return q
 
 
-  # def forward(self, x, h):
-  #   x = F.relu(self.fc1(x))
-  #   h = self.lstm(x, h)  # h is (hidden state, cell state)
-  #   x = h[0]
-  #   policy = F.softmax(self.fc_actor(F.relu(self.fc_actor1(x))), dim=1).clamp(max=1 - 1e-20)  # Prevent 1s and hence NaNs
-  #   Q = self.fc_critic(F.relu(self.fc_critic1(x)))
-  #   V = (Q * policy).sum(1, keepdim=True)  # V is expectation of Q under π
-  #   return policy, Q, V, h
+class TimeoutError(Exception): pass
+
+
+class timeout:
+    def __init__(self, seconds=1, error_message='Timeout'):
+        self.seconds = seconds
+        self.error_message = error_message
+
+    def handle_timeout(self, signum, frame):
+        raise TimeoutError(self.error_message)
+
+    def __enter__(self):
+        signal.signal(signal.SIGALRM, self.handle_timeout)
+        signal.alarm(self.seconds)
+
+    def __exit__(self, type, value, traceback):
+        signal.alarm(0)
 
 
 class Counter():
@@ -206,7 +207,7 @@ def actor(rank, args, T, BEST,memory_queue,model_queue):
     torch.manual_seed(args.seed + rank)
     env = gym.make(args.env, java_env_path=".", port=args.port + rank * 2)
     env.seed(args.seed + rank)
-    model = ActorCritic(env.observation_space, env.action_space)
+    model = ActorCritic(env.observation_space, env.action_space,args.hidden_size)
 
     scores = []
     n_epi = 0
@@ -214,7 +215,13 @@ def actor(rank, args, T, BEST,memory_queue,model_queue):
 
     # Actor Loop
     while T.value() <= args.T_max:
-        s = env.reset(p2=args.p2)
+        try:
+            with timeout(seconds=30):
+                s = env.reset(p2=args.p2)
+        except TimeoutError:
+            print("Time out to reset env")
+            env.close()
+            continue
         if not model_queue.empty():
             model.load_state_dict(model_queue.get())
             print("Load New Model at EPISODE {}".format(T.value()))
@@ -248,7 +255,6 @@ def actor(rank, args, T, BEST,memory_queue,model_queue):
                 break
         if not discard:
             n_epi += 1
-            T.increment()
             m_score = np.mean(scores[-50:])
             print("Process: {}, # of episode :{}, round score : {}, 100 round mean score: {}".format(rank, n_epi, round_score, m_score))
             if m_score*400 > BEST.value():
@@ -286,7 +292,7 @@ if __name__ == '__main__':
     # writer = SummaryWriter(log_dir=save_dir, comment="-" + args.env + "-" + args.p2)
     memory = ReplayBuffer()
     env = gym.make(args.env, java_env_path=".", port=args.port)
-    model = ActorCritic(env.observation_space, env.action_space, )
+    model = ActorCritic(env.observation_space, env.action_space, args.hidden_size)
     shared_model = copy.deepcopy(model)
     model.to(device)
     optimizer = optim.Adam(model.parameters(), lr=args.lr)
@@ -314,7 +320,7 @@ if __name__ == '__main__':
         # Start training agents
         for rank in range(1, args.num_processes + 1):
             model_queue.put(shared_model.state_dict())
-            p = mp.Process(target=actor, args=(rank, args, T, BEST, memory_queue,model_queue))
+            p = mp.Process(target=actor, args=(rank, args, T, BEST, memory_queue, model_queue))
             p.start()
             sleep(15)
             print('Process ' + str(rank) + ' started')
@@ -327,24 +333,25 @@ if __name__ == '__main__':
         best = BEST.value()
 
         # receive data from actor then train and record into tensorboard
-        if not memory_queue.empty():
-            print("EPISODE: {}, BEST: {}".format(t, best))
-            # writer.add_scalar("reward/round_score", round_score, T.value())
-            # writer.add_scalar("reward/mean_score", m_score, T.value())
-            # writer.add_scalar("indicator/entropy", action_entropy, T.value())
-            memory.put(memory_queue.get())
-            train(model, optimizer, memory, on_policy=True, device=device)
-            print("Training Model on-policy at EPISODE {}".format(t))
-            if memory.size() > args.replay_start:
-                print("Training Model off-policy at EPISODE {}".format(t))
-                train(model, optimizer, memory, device=device)
+
+        print("EPISODE: {}, BEST: {}".format(t, best))
+        # writer.add_scalar("reward/round_score", round_score, T.value())
+        # writer.add_scalar("reward/mean_score", m_score, T.value())
+        # writer.add_scalar("indicator/entropy", action_entropy, T.value())
+        memory.put(memory_queue.get())
+        T.increment()
+        train(model, optimizer, memory, on_policy=True, device=device)
+        print("Training Model on-policy at EPISODE {}".format(t))
+        if memory.size() > args.replay_start:
+            print("Training Model off-policy at EPISODE {}".format(t))
+            train(model, optimizer, memory, device=device)
 
         # save the best model
         if best > pre_best:
             print("Save BEST model!")
-            torch.save(model.state_dict(), os.path.join("OpenAI/ACER/checkpoint/", 'model_{}_{}'.format("BEST", best)))  # Save model params
-            torch.save(memory, os.path.join("OpenAI/ACER/checkpoint/", 'memory_{}_{}'.format("BEST", best)))  # Save memory
-            torch.save((t, best), os.path.join("OpenAI/ACER/checkpoint/", 'indicator_{}_{}'.format("BEST", best)))  # Save data
+            torch.save(model.state_dict(), os.path.join("OpenAI/ACER/checkpoint/", 'model_{}'.format("BEST",)))  # Save model params
+            torch.save(memory, os.path.join("OpenAI/ACER/checkpoint/", 'memory_{}'.format("BEST",)))  # Save memory
+            torch.save((t, best), os.path.join("OpenAI/ACER/checkpoint/", 'indicator_{}'.format("BEST")))  # Save data
             pre_best = BEST.value()
 
         # deliver model from learner to actor and save the latest model
@@ -356,6 +363,6 @@ if __name__ == '__main__':
             for _ in range(args.num_processes):
                 model_queue.put(shared_model.state_dict())
             print("Save LATEST model!")
-            torch.save(model.state_dict(), os.path.join("OpenAI/ACER/checkpoint/", 'model_{}_{}'.format("LATEST", t)))  # Save model params
-            torch.save(memory, os.path.join("OpenAI/ACER/checkpoint/", 'memory_{}_{}'.format("LATEST", t)))  # Save memory
-            torch.save((t, best), os.path.join("OpenAI/ACER/checkpoint/", 'indicator_{}_{}'.format("LATEST", t)))  # Save data
+            torch.save(model.state_dict(), os.path.join("OpenAI/ACER/checkpoint/", 'model_{}'.format("LATEST",)))  # Save model params
+            torch.save(memory, os.path.join("OpenAI/ACER/checkpoint/", 'memory_{}'.format("LATEST",)))  # Save memory
+            torch.save((t, best), os.path.join("OpenAI/ACER/checkpoint/", 'indicator_{}'.format("LATEST")))  # Save data

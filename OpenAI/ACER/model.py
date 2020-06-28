@@ -20,11 +20,8 @@ class ActorCritic(nn.Module):
         x = F.relu(self.fc1(x))
         h = self.lstm(x, h)  # h is (hidden state, cell state)
         x = h[0]
-        if action_mask is not None:
-            policy = self.fc_actor(F.relu(self.fc_actor1(x))).masked_fill(action_mask, float("-inf"))
-        else:
-            policy = self.fc_actor(F.relu(self.fc_actor1(x)))
-        policy = F.softmax(policy, dim=1).clamp(max=1 - 1e-20)  # Prevent 1s and hence NaNs
+        policy = self.fc_actor(F.relu(self.fc_actor1(x))).masked_fill(action_mask, float("-inf"))
+        policy = F.softmax(policy, dim=1).clamp(max=1 - 1e-20, min=1e-20)  # Prevent 1s and hence NaNs
         Q = self.fc_critic(F.relu(self.fc_critic1(x)))
         V = (Q * policy).sum(1, keepdim=True)  # V is expectation of Q under π
         return policy, Q, V, h
