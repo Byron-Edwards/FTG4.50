@@ -13,31 +13,25 @@ import torch.nn as nn
 import torch.multiprocessing as mp
 import torch.nn.functional as F
 import torch.optim as optim
+from datetime import datetime
 from torch.utils.tensorboard import SummaryWriter
 from torch.distributions import Categorical
-
+from collections import deque, namedtuple
 # Characteristics
 # 1. Discrete action space, single thread version.
 # 2. Does not support trust-region updates.
 
-# Hyperparameters
-learning_rate = 0.0002
-gamma = 0.98
-buffer_limit = 10000
-rollout_len = 600
-batch_size = 32  # Indicates 4 sequences per mini-batch (4*rollout_len = 40 samples total)
-c = 0.75  # For truncating importance sampling ratio
-
+# Hyper parameters
 parser = argparse.ArgumentParser(description='ACER')
 parser.add_argument('--seed', type=int, default=123, help='Random seed')
 parser.add_argument('--cuda', type=bool, default=True, help='cuda Device')
-parser.add_argument('--num-processes', type=int, default=6, metavar='N', help='Number of training async agents (does not include single validation agent)')
+parser.add_argument('--num-processes', type=int, default=4, metavar='N', help='Number of training async agents (does not include single validation agent)')
 parser.add_argument('--T-max', type=int, default=10e7, metavar='STEPS', help='Number of training steps')
 parser.add_argument('--t-max', type=int, default=300, metavar='STEPS', help='Max number of forward steps for A3C before update')
 parser.add_argument('--max-episode-length', type=int, default=1000, metavar='LENGTH', help='Maximum episode length')
-parser.add_argument('--hidden-size', type=int, default=32, metavar='SIZE', help='Hidden size of LSTM cell')
+parser.add_argument('--hidden-size', type=int, default=128, metavar='SIZE', help='Hidden size of LSTM cell')
 parser.add_argument('--model',default="",type=str, metavar='PARAMS', help='Pretrained model (state dict)')
-parser.add_argument('--memory',default="", type=str, metavar='PARAMS', help='Pretrained model (state dict)')
+parser.add_argument('--memory',default="./OpenAI/ACER/checkpoint/memory_LATEST", type=str, metavar='PARAMS', help='Pretrained model (state dict)')
 parser.add_argument('--data',default="", type=str, metavar='PARAMS', help='Pretrained model (state dict)')
 parser.add_argument('--on-policy', action='store_true', help='Use pure on-policy training (A3C)')
 parser.add_argument('--memory-capacity', type=int, default=100000, metavar='CAPACITY', help='Experience replay memory capacity')
@@ -45,15 +39,15 @@ parser.add_argument('--replay-ratio', type=int, default=4, metavar='r', help='Ra
 parser.add_argument('--replay_start', type=int, default=1000, metavar='EPISODES', help='Number of transitions to save before starting off-policy training')
 parser.add_argument('--discount', type=float, default=0.99, metavar='γ', help='Discount factor')
 parser.add_argument('--trace-decay', type=float, default=1, metavar='λ', help='Eligibility trace decay factor')
-parser.add_argument('--trace-max', type=float, default=5, metavar='c', help='Importance weight truncation (max) value')
+parser.add_argument('--trace-max', type=float, default=10, metavar='c', help='Importance weight truncation (max) value')
 parser.add_argument('--trust-region', action='store_true', help='Use trust region')
 parser.add_argument('--trust-region-decay', type=float, default=0.99, metavar='α', help='Average model weight decay rate')
 parser.add_argument('--trust-region-threshold', type=float, default=1, metavar='δ', help='Trust region threshold value')
 parser.add_argument('--reward-clip', action='store_true', help='Clip rewards to [-1, 1]')
-parser.add_argument('--lr', type=float, default=0.0001, metavar='η', help='Learning rate')
-parser.add_argument('--lr-deca y', action='store_true', help='Linearly decay learning rate to 0')
+parser.add_argument('--lr', type=float, default=0.00005, metavar='η', help='Learning rate')
+parser.add_argument('--lr-decay', default=True, action='store_true', help='Linearly decay learning rate to 0')
 parser.add_argument('--rmsprop-decay', type=float, default=0.99, metavar='α', help='RMSprop decay factor')
-parser.add_argument('--batch-size', type=int, default=32, metavar='SIZE', help='Off-policy batch size')
+parser.add_argument('--batch-size', type=int, default=16, metavar='SIZE', help='Off-policy batch size')
 parser.add_argument('--entropy-weight', type=float, default=0.0001, metavar='β', help='Entropy regularisation weight')
 parser.add_argument('--max-gradient-norm', type=float, default=40, metavar='VALUE', help='Gradient L2 normalisation')
 parser.add_argument('--evaluate', action='store_true', help='Evaluate only')
@@ -64,11 +58,12 @@ parser.add_argument('--name', type=str, default='./OpenAI/ACER', help='Save fold
 parser.add_argument('--env', type=str, default='FightingiceDataNoFrameskip-v0',help='environment name')
 parser.add_argument('--port', type=int, default=5000,help='FightingICE running Port')
 parser.add_argument('--p2', type=str, default="RHEA_PI",help='FightingICE running Port')
+args = parser.parse_args()
 
 
 class ReplayBuffer():
     def __init__(self):
-        self.buffer = collections.deque(maxlen=buffer_limit)
+        self.buffer = deque(maxlen=args.memory_capacity)
 
     def put(self, seq_data):
         self.buffer.append(seq_data)
@@ -77,13 +72,13 @@ class ReplayBuffer():
         if on_policy:
             mini_batch = [self.buffer[-1]]
         else:
-            mini_batch = random.sample(self.buffer, batch_size)
+            mini_batch = random.sample(self.buffer, args.batch_size)
 
-        s_lst, a_lst, r_lst, prob_lst, done_lst, is_first_lst = [], [], [], [], [], []
+        s_lst, a_lst, r_lst, prob_lst, done_lst, is_first_lst, action_mask_list = [], [], [], [], [], [],[]
         for seq in mini_batch:
             is_first = True  # Flag for indicating whether the transition is the first item from a sequence
             for transition in seq:
-                s, a, r, prob, done = transition
+                s, a, r, prob, done, action_mask = transition
 
                 s_lst.append(s)
                 a_lst.append([a])
@@ -92,12 +87,14 @@ class ReplayBuffer():
                 done_mask = 0.0 if done else 1.0
                 done_lst.append(done_mask)
                 is_first_lst.append(is_first)
+                action_mask_list.append(action_mask)
                 is_first = False
 
-        s, a, r, prob, done_mask, is_first = torch.tensor(s_lst, dtype=torch.float), torch.tensor(a_lst), \
-                                             torch.tensor(r_lst), torch.tensor(prob_lst, dtype=torch.float), torch.tensor(done_lst), \
-                                             torch.tensor(is_first_lst)
-        return s, a, r, prob, done_mask, is_first
+        s, a, r, prob, done_mask, is_first, action_mask = torch.tensor(s_lst, dtype=torch.float), torch.tensor(a_lst),\
+                                                          torch.tensor(r_lst), torch.tensor(prob_lst, dtype=torch.float),\
+                                                          torch.tensor(done_lst), torch.tensor(is_first_lst), \
+                                                          torch.tensor(action_mask_list)
+        return s, a, r, prob, done_mask, is_first, action_mask
 
     def size(self):
         return len(self.buffer)
@@ -113,10 +110,10 @@ class ActorCritic(nn.Module):
         self.fc_pi = nn.Linear(hidden_size, self.action_size)
         self.fc_q = nn.Linear(hidden_size, self.action_size)
 
-    def pi(self, x, softmax_dim=0):
+    def pi(self, x, action_mask, softmax_dim=0):
         x = F.relu(self.fc2(F.relu(self.fc1(x))))
-        x = self.fc_pi(x)
-        pi = F.softmax(x, dim=softmax_dim)
+        x = self.fc_pi(x).masked_fill(action_mask, float("-inf"))
+        pi = F.softmax(x, dim=softmax_dim).clamp(min=0 + 1e-20, max=1 - 1e-20)
         return pi
 
     def q(self, x):
@@ -162,29 +159,31 @@ class Counter():
             return self.val.value
 
 
-def train(model, optimizer, memory, on_policy=False, device=torch.device("cuda")):
-    s, a, r, prob, done_mask, is_first = memory.sample(on_policy)
+def train(model, t, optimizer, memory, on_policy=False, device=torch.device("cuda")):
+    print("Training {}".format("on-policy" if on_policy else "off-policy"))
+    s, a, r, prob, done_mask, is_first, action_mask = memory.sample(on_policy)
     s = s.to(device)
     a = a.to(device)
     r = r.to(device)
     prob = prob.to(device)
     done_mask = done_mask.to(device)
     is_first = is_first.to(device)
+    action_mask = action_mask.to(device)
     q = model.q(s)
     q_a = q.gather(1, a)
-    pi = model.pi(s, softmax_dim=1)
+    pi = model.pi(s, action_mask, softmax_dim=1)
     pi_a = pi.gather(1, a)
     v = (q * pi).sum(1).unsqueeze(1).detach()
 
     rho = (pi.detach() / prob)
     rho_a = rho.gather(1, a)
-    rho_bar = rho_a.clamp(max=c)
-    correction_coeff = ((1 - c / rho).clamp(min=0))
+    rho_bar = rho_a.clamp(max=args.trace_max)
+    correction_coeff = ((1 - args.trace_max / rho).clamp(min=0))
 
     q_ret = (v[-1] * done_mask[-1])
     q_ret_lst = []
     for i in reversed(range(len(r))):
-        q_ret = r[i] + gamma * q_ret
+        q_ret = r[i] + args.discount * q_ret
         q_ret_lst.append(q_ret.item())
         q_ret = rho_bar[i] * (q_ret - q_a[i]) + v[i]
 
@@ -196,25 +195,39 @@ def train(model, optimizer, memory, on_policy=False, device=torch.device("cuda")
 
     loss1 = -rho_bar * torch.log(pi_a) * (q_ret - v)
     loss2 = -correction_coeff * pi.detach() * torch.log(pi) * (q.detach() - v)  # bias correction term
-    loss = loss1 + loss2.sum(1) + F.smooth_l1_loss(q_a, q_ret)
+    policy_loss = loss1 + loss2.sum(1)
+    value_loss = F.smooth_l1_loss(q_a, q_ret)
+    loss = policy_loss + value_loss
 
     optimizer.zero_grad()
     loss.mean().backward()
+    nn.utils.clip_grad_norm_(model.parameters(), args.max_gradient_norm)
     optimizer.step()
 
+    lr = args.lr
+    if args.lr_decay:
+        # Linearly decay learning rate
+        for param_group in optimizer.param_groups:
+            param_group['lr'] = max(args.lr * (args.T_max - t) / args.T_max, 1e-32)
+            lr = param_group['lr']
 
-def actor(rank, args, T, BEST,memory_queue,model_queue):
+    writer.add_scalar("loss/policy_loss", policy_loss.mean().detach(), t)
+    writer.add_scalar("loss/value_loss", value_loss.mean().detach(), t)
+    writer.add_scalar("loss/total_loss", loss.mean().detach(), t)
+    writer.add_scalar("loss/learning_rate", lr, t)
+
+
+def actor(rank, args, T,memory_queue,model_queue):
     torch.manual_seed(args.seed + rank)
     env = gym.make(args.env, java_env_path=".", port=args.port + rank * 2)
     env.seed(args.seed + rank)
     model = ActorCritic(env.observation_space, env.action_space,args.hidden_size)
 
-    scores = []
     n_epi = 0
-    action_entropy = 4.025
 
     # Actor Loop
     while T.value() <= args.T_max:
+        t_value = T.value()
         try:
             with timeout(seconds=30):
                 s = env.reset(p2=args.p2)
@@ -223,42 +236,47 @@ def actor(rank, args, T, BEST,memory_queue,model_queue):
             env.close()
             continue
         if not model_queue.empty():
-            model.load_state_dict(model_queue.get())
-            print("Load New Model at EPISODE {}".format(T.value()))
+            print("Process {} going to load new model at EPISODE {}......".format(rank, t_value))
+            received_obj = model_queue.get()
+            model_dict = copy.deepcopy(received_obj)
+            model.load_state_dict(model_dict)
+            print("Process {} finished loading new mode at EPISODE {}!!!!!!".format(rank, t_value))
+            del received_obj
+        action_mask = [False for _ in range(env.action_space.n)]
+        action_mask = torch.BoolTensor(action_mask)
         done = False
         discard = False
         round_score = 0
+        episode_length = 0
+        sum_entropy = 0
+        seq_data = []
         while not done:
-
-            seq_data = []
-            for t in range(rollout_len):
-                if isinstance(s, list):
-                    s = s[0]
-                prob = model.pi(torch.from_numpy(s).float())
-                action_entropy = Categorical(probs=prob).entropy()
-                a = Categorical(prob).sample().item()
-                s_prime, r, done, info = env.step(a)
-                if info.get('no_data_receive', False):
-                    env.close()
-                    discard = True
-                seq_data.append((s, a, r, prob.detach().cpu().numpy(), done))
-
-                round_score += r
-                s = s_prime
-                if done or discard:
-                    break
-            if not discard:
-                memory_queue.put(seq_data)
-                scores.append(round_score)
-                print("PUT DATA")
-            else:
+            prob = model.pi(torch.from_numpy(s).float(), action_mask)
+            sum_entropy += Categorical(probs=prob.detach()).entropy()
+            a = Categorical(prob.detach()).sample().item()
+            s_prime, r, done, info = env.step(a)
+            if info.get('no_data_receive', False):
+                env.close()
+                discard = True
                 break
+            valid_actions = info.get('my_action_enough', {})
+            # get valid actions
+            if len(valid_actions) > 0:
+                action_mask = [False if i in valid_actions else True for i in range(56)]
+            else:
+                action_mask = [False for _ in range(env.action_space.n)]
+            action_mask = torch.BoolTensor(action_mask)
+            seq_data.append((s, a, r, prob.detach().numpy(), done, action_mask.detach().numpy()))
+            round_score += r
+            s = s_prime
+            episode_length += 1
         if not discard:
             n_epi += 1
-            m_score = np.mean(scores[-50:])
-            print("Process: {}, # of episode :{}, round score : {}, 100 round mean score: {}".format(rank, n_epi, round_score, m_score))
-            if m_score*400 > BEST.value():
-                BEST.set(int(m_score*400))
+            on_policy_data = (seq_data, (episode_length, round_score, sum_entropy / episode_length))
+            print("Process: {}, # of episode :{}, round score : {}, episode_length: {}".format(rank, n_epi, round_score, episode_length))
+            send_object = copy.deepcopy(on_policy_data)
+            memory_queue.put(send_object, )
+            print("Process {} send trajectory".format(rank))
     env.close()
 
 
@@ -268,7 +286,6 @@ if __name__ == '__main__':
     os.environ['MKL_NUM_THREADS'] = '1'
     # mp.set_start_method("spawn")
     # Setup
-    args = parser.parse_args()
     # Creating directories.
     save_dir = os.path.join(args.name, 'checkpoint')
     if not os.path.exists(save_dir):
@@ -281,6 +298,10 @@ if __name__ == '__main__':
             print(' ' * 26 + k + ': ' + str(v))
             f.write(k + ' : ' + str(v) + '\n')
 
+    tensorboard_dir = os.path.join(args.name, 'checkpoint',"runs",datetime.now().strftime("%Y%m%d-%H%M%S"))
+    if not os.path.exists(tensorboard_dir):
+        os.makedirs(tensorboard_dir)
+
     torch.manual_seed(args.seed)
     device = torch.device("cuda" if args.cuda else "cpu")
     gym.logger.set_level(gym.logger.INFO)  # Disable Gym warnings
@@ -291,11 +312,13 @@ if __name__ == '__main__':
     pre_best = BEST.value()
     # writer = SummaryWriter(log_dir=save_dir, comment="-" + args.env + "-" + args.p2)
     memory = ReplayBuffer()
+    writer = SummaryWriter(log_dir=tensorboard_dir)
     env = gym.make(args.env, java_env_path=".", port=args.port)
     model = ActorCritic(env.observation_space, env.action_space, args.hidden_size)
     shared_model = copy.deepcopy(model)
     model.to(device)
     optimizer = optim.Adam(model.parameters(), lr=args.lr)
+    scores = []
     env.close()
     del env
 
@@ -306,21 +329,22 @@ if __name__ == '__main__':
         shared_model.load_state_dict(torch.load(args.model, map_location="cpu"))
     if args.memory and os.path.isfile(args.memory):
         memory = torch.load(args.memory)
-        print("Load memory from CheckPoint {}, memory len: {}".format(args.data, len(memory)))
+        print("Load memory from CheckPoint {}, memory len: {}".format(args.memory, memory.size()))
     if args.data and os.path.isfile(args.data):
         T.set(torch.load(args.data)[0])
         BEST.set(torch.load(args.data)[1])
+        scores = torch.load(args.data)[2]
         pre_best = BEST.value()
-        print("Load data from CheckPoint {}, T: {}.BEST: {}".format(args.data, T.value(),BEST.value()))
+        print("Load data from CheckPoint {}, T: {}.BEST: {}".format(args.data, T.value(), BEST.value()))
 
-    memory_queue = mp.Queue()
-    model_queue = mp.Queue()
+    memory_queue = mp.SimpleQueue()
+    model_queue = mp.SimpleQueue()
     processes = []
     if not args.evaluate:
         # Start training agents
         for rank in range(1, args.num_processes + 1):
             model_queue.put(shared_model.state_dict())
-            p = mp.Process(target=actor, args=(rank, args, T, BEST, memory_queue, model_queue))
+            p = mp.Process(target=actor, args=(rank, args, T, memory_queue, model_queue))
             p.start()
             sleep(15)
             print('Process ' + str(rank) + ' started')
@@ -329,40 +353,56 @@ if __name__ == '__main__':
     c_t = 0
     # Learner Loop
     while T.value() <= args.T_max:
+        # receive data from actor then train and record into tensorboard
+        print("Going to read data from ACTOR......")
+        received_obj = memory_queue.get()
+        print("Finish Reading data from ACTOR!!!!!!")
+        on_policy_data = copy.deepcopy(received_obj)
+        del received_obj
+
+        T.increment()
         t = T.value()
         best = BEST.value()
-
-        # receive data from actor then train and record into tensorboard
-
-        print("EPISODE: {}, BEST: {}".format(t, best))
-        # writer.add_scalar("reward/round_score", round_score, T.value())
-        # writer.add_scalar("reward/mean_score", m_score, T.value())
-        # writer.add_scalar("indicator/entropy", action_entropy, T.value())
-        memory.put(memory_queue.get())
-        T.increment()
-        train(model, optimizer, memory, on_policy=True, device=device)
-        print("Training Model on-policy at EPISODE {}".format(t))
+        (trajectory, (episode_length, round_score, average_entropy)) = on_policy_data
+        memory.put(trajectory)
+        scores.append(round_score)
+        m_score = np.mean(scores[-100:])
+        if m_score * 400 > BEST.value():
+            BEST.set(int(m_score * 400))
+            best = BEST.value()
+        writer.add_scalar("reward/round_score", round_score, t)
+        writer.add_scalar("reward/mean_score", m_score, t)
+        writer.add_scalar("indicator/entropy", average_entropy, t)
+        writer.add_scalar("indicator/episode_length", episode_length, t)
+        print("EPISODE: {}, BEST: {}, MEAN_SCORE: {}".format(t, best, m_score))
+        train(model, t, optimizer, memory, on_policy=True, device=device)
         if memory.size() > args.replay_start:
-            print("Training Model off-policy at EPISODE {}".format(t))
-            train(model, optimizer, memory, device=device)
+            train(model, t, optimizer, memory, device=device)
 
         # save the best model
         if best > pre_best:
             print("Save BEST model!")
-            torch.save(model.state_dict(), os.path.join("OpenAI/ACER/checkpoint/", 'model_{}'.format("BEST",)))  # Save model params
-            torch.save(memory, os.path.join("OpenAI/ACER/checkpoint/", 'memory_{}'.format("BEST",)))  # Save memory
-            torch.save((t, best), os.path.join("OpenAI/ACER/checkpoint/", 'indicator_{}'.format("BEST")))  # Save data
-            pre_best = BEST.value()
+            torch.save(model.state_dict(),
+                       os.path.join("OpenAI/ACER/checkpoint/", 'model_{}'.format("BEST")))  # Save model params
+            torch.save(memory,
+                       os.path.join("OpenAI/ACER/checkpoint/", 'memory_{}'.format("BEST")))  # Save memory
+            torch.save((t, best, scores),
+                       os.path.join("OpenAI/ACER/checkpoint/", 'indicator_{}'.format("BEST")))  # Save data
+            pre_best = best
 
         # deliver model from learner to actor and save the latest model
-        if t % args.num_processes * 4 == 0 and t > 1 and c_t < t:
+        if t % (args.num_processes * 10) == 0 and t > 1 and c_t < t:
             shared_model = copy.deepcopy(model)
             shared_model.to(torch.device("cpu"))
-            print("deep copy share model!")
+            shared_model_dict = copy.deepcopy(shared_model.state_dict())
             c_t = t
             for _ in range(args.num_processes):
-                model_queue.put(shared_model.state_dict())
-            print("Save LATEST model!")
-            torch.save(model.state_dict(), os.path.join("OpenAI/ACER/checkpoint/", 'model_{}'.format("LATEST",)))  # Save model params
-            torch.save(memory, os.path.join("OpenAI/ACER/checkpoint/", 'memory_{}'.format("LATEST",)))  # Save memory
-            torch.save((t, best), os.path.join("OpenAI/ACER/checkpoint/", 'indicator_{}'.format("LATEST")))  # Save data
+                model_queue.put(shared_model_dict,)
+            print("Saving LATEST model......")
+            torch.save(model.state_dict(),
+                       os.path.join("OpenAI/ACER/checkpoint/", 'model_{}'.format("LATEST",)))  # Save model params
+            torch.save(memory,
+                       os.path.join("OpenAI/ACER/checkpoint/", 'memory_{}'.format("LATEST",)))  # Save memory
+            torch.save((t, best, scores),
+                       os.path.join("OpenAI/ACER/checkpoint/", 'indicator_{}'.format("LATEST",)))  # Save data
+            print("Save LATEST model!!!!!!")
