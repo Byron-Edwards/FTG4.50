@@ -14,6 +14,7 @@ import torch.nn as nn
 import torch.multiprocessing as mp
 import torch.nn.functional as F
 import torch.optim as optim
+import itertools
 from datetime import datetime
 from torch.utils.tensorboard import SummaryWriter
 from torch.distributions import Categorical
@@ -31,9 +32,9 @@ parser.add_argument('--T-max', type=int, default=10e7, metavar='STEPS', help='Nu
 parser.add_argument('--t-max', type=int, default=300, metavar='STEPS', help='Max number of forward steps for A3C before update')
 parser.add_argument('--max-episode-length', type=int, default=1000, metavar='LENGTH', help='Maximum episode length')
 parser.add_argument('--hidden-size', type=int, default=32, metavar='SIZE', help='Hidden size of LSTM cell')
-parser.add_argument('--model',default="",type=str, metavar='PARAMS', help='Pretrained model (state dict)')
-parser.add_argument('--memory',default="", type=str, metavar='PARAMS', help='Pretrained model (state dict)')
-parser.add_argument('--data',default="", type=str, metavar='PARAMS', help='Pretrained model (state dict)')
+parser.add_argument('--model',default="./OpenAI/ACER/checkpoint/model_LATEST",type=str, metavar='PARAMS', help='Pretrained model (state dict)')
+parser.add_argument('--memory',default="./OpenAI/ACER/checkpoint/memory", type=str, metavar='PARAMS', help='Pretrained model (state dict)')
+parser.add_argument('--data',default="./OpenAI/ACER/checkpoint/indicator_LATEST", type=str, metavar='PARAMS', help='Pretrained model (state dict)')
 parser.add_argument('--on-policy', action='store_true', help='Use pure on-policy training (A3C)')
 parser.add_argument('--memory-capacity', type=int, default=100000, metavar='CAPACITY', help='Experience replay memory capacity')
 parser.add_argument('--replay-ratio', type=int, default=4, metavar='r', help='Ratio of off-policy to on-policy updates')
@@ -62,6 +63,7 @@ args = parser.parse_args()
 class ReplayBuffer():
     def __init__(self):
         self.buffer = deque(maxlen=args.memory_capacity)
+        self.checkpoint = 0
 
     def put(self, seq_data):
         self.buffer.append(seq_data)
@@ -96,6 +98,37 @@ class ReplayBuffer():
 
     def size(self):
         return len(self.buffer)
+
+    def save(self, save_dir, save_all=False, save_all_interval=500):
+        if not os.path.isdir(save_dir):
+            os.makedirs(save_dir)
+            print("Create memory saving directory at {}".format(save_dir))
+        if save_all:
+            for i in range(0, self.size(), save_all_interval):
+                if i + save_all_interval > self.size():
+                    deque_slice = deque(itertools.islice(self.buffer, i, self.size()))
+                else:
+                    deque_slice = deque(itertools.islice(self.buffer, i, i + save_all_interval))
+                torch.save(deque_slice,
+                           os.path.join(save_dir, 'memory_{}_{}_{}'.format(i, i + len(deque_slice),
+                                                                           datetime.now().strftime("%Y%m%d-%H%M%S"))))
+        else:
+            if self.checkpoint == self.size():
+                return
+            deque_slice = deque(itertools.islice(self.buffer, self.checkpoint, self.size()))
+            torch.save(deque_slice,
+                   os.path.join(save_dir, 'memory_{}_{}_{}'.format(self.checkpoint, self.size(),
+                                                                   datetime.now().strftime("%Y%m%d-%H%M%S"))))
+        self.checkpoint = self.size()
+
+    def load(self, save_dir):
+        for filename in os.listdir(save_dir):
+            memory_sequence = os.path.join(save_dir, filename)
+            self.buffer.extend(torch.load(memory_sequence))
+        self.checkpoint = self.size()
+
+
+
 
 
 class ActorCritic(nn.Module):
@@ -226,7 +259,7 @@ def train(model, t, optimizer, memory, on_policy=False, device=torch.device("cud
         for param_group in optimizer.param_groups:
             param_group['lr'] = max(args.lr
                                     # * (0.8 ** (n_bounce + 1))
-                                    * (0.5**((t-t_bounce)/1000)), 1e-32)
+                                    * (0.5**((t-t_bounce)/2000)), 1e-6)
             lr = param_group['lr']
 
     writer.add_scalar("loss/policy_loss", policy_loss.mean().detach(), t)
@@ -347,8 +380,8 @@ if __name__ == '__main__':
         print("Load model from checkpoint {}".format(args.model))
         model.load_state_dict(torch.load(args.model))
         shared_model.load_state_dict(torch.load(args.model, map_location="cpu"))
-    if args.memory and os.path.isfile(args.memory):
-        memory = torch.load(args.memory)
+    if args.memory and os.path.isdir(args.memory):
+        memory.load(args.memory)
         print("Load memory from CheckPoint {}, memory len: {}".format(args.memory, memory.size()))
     if args.data and os.path.isfile(args.data):
         T.set(torch.load(args.data)[0])
@@ -418,8 +451,7 @@ if __name__ == '__main__':
             print("Save BEST model!")
             torch.save(model.state_dict(),
                        os.path.join("OpenAI/ACER/checkpoint/", 'model_{}'.format("BEST")))  # Save model params
-            torch.save(memory,
-                       os.path.join("OpenAI/ACER/checkpoint/", 'memory_{}'.format("BEST")))  # Save memory
+            memory.save(args.memory)
             torch.save((t, best, scores,m_scores),
                        os.path.join("OpenAI/ACER/checkpoint/", 'indicator_{}'.format("BEST")))  # Save data
             pre_best = best
@@ -435,8 +467,7 @@ if __name__ == '__main__':
             print("Saving LATEST model......")
             torch.save(model.state_dict(),
                        os.path.join("OpenAI/ACER/checkpoint/", 'model_{}'.format("LATEST",)))  # Save model params
-            torch.save(memory,
-                       os.path.join("OpenAI/ACER/checkpoint/", 'memory_{}'.format("LATEST",)))  # Save memory
+            memory.save(args.memory)
             torch.save((t, best, scores,m_scores),
                        os.path.join("OpenAI/ACER/checkpoint/", 'indicator_{}'.format("LATEST",)))  # Save data
             print("Save LATEST model!!!!!!")
