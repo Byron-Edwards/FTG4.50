@@ -1,5 +1,9 @@
 # -*- coding: utf-8 -*-
+import os
 import random
+import torch
+import itertools
+from datetime import datetime
 from collections import deque, namedtuple
 
 Transition = namedtuple('Transition', ('state', 'action', 'reward', 'policy', 'action_mask'))
@@ -12,6 +16,7 @@ class EpisodicReplayMemory():
         self.num_episodes = int(capacity)
         self.memory = deque(maxlen=self.num_episodes)
         self.trajectory = []
+        self.checkpoint = self.length()
 
     def append_transition(self, state, action, reward, policy, action_mask, discard=False):
         self.trajectory.append(Transition(state, action, reward, policy, action_mask))  # Save s_i, a_i, r_i+1, µ(·|s_i)
@@ -23,6 +28,8 @@ class EpisodicReplayMemory():
 
     def append_trajectory(self, trajectory):
         self.memory.append(trajectory)
+        if self.length() == self.num_episodes:
+            self.checkpoint -= 1
 
     # Samples random trajectory
     def sample(self, maxlen=0):
@@ -55,3 +62,29 @@ class EpisodicReplayMemory():
 
     def __len__(self):
         return len(self.memory)
+
+    def save(self, save_dir, save_all=False, save_all_interval=500):
+        if not os.path.isdir(save_dir):
+            os.makedirs(save_dir)
+            print("Create memory saving directory at {}".format(save_dir))
+        if save_all:
+            for i in range(0, self.length(), save_all_interval):
+                if i + save_all_interval > self.length():
+                    deque_slice = deque(itertools.islice(self.memory, i, self.length()))
+                else:
+                    deque_slice = deque(itertools.islice(self.memory, i, i + save_all_interval))
+                torch.save(deque_slice,
+                           os.path.join(save_dir, 'memory_{}_{}_{}'.format(i, i + len(deque_slice),
+                                                                           datetime.now().strftime("%Y%m%d-%H%M%S"))))
+        else:
+            deque_slice = deque(itertools.islice(self.memory, self.checkpoint, self.length()))
+            torch.save(deque_slice,
+                       os.path.join(save_dir, 'memory_{}_{}_{}'.format(self.checkpoint, self.length(),
+                                                                       datetime.now().strftime("%Y%m%d-%H%M%S"))))
+        self.checkpoint = self.length()
+
+    def load(self, save_dir):
+        for filename in os.listdir(save_dir):
+            memory_sequence = os.path.join(save_dir, filename)
+            self.memory.extend(torch.load(memory_sequence))
+        self.checkpoint = self.length()

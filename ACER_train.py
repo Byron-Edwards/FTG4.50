@@ -157,15 +157,13 @@ def _train(args, T, model, shared_average_model, optimiser, policies, Qs, Vs, ac
     loss.backward()
     # Gradient L2 normalisation
     nn.utils.clip_grad_norm_(model.parameters(), args.max_gradient_norm)
-
-    # Transfer gradients to shared model and update
-
     optimiser.step()
     lr = args.lr
     if args.lr_decay:
         # Linearly decay learning rate
         for param_group in optimiser.param_groups:
-            param_group['lr'] = max(args.lr * (args.T_max - T) / args.T_max, 1e-32)
+            param_group['lr'] = max(args.lr
+                                    * (0.5 ** (T / 2000)), args.lr_min)
             lr = param_group['lr']
 
     # Update shared_average_model
@@ -180,11 +178,12 @@ def _train(args, T, model, shared_average_model, optimiser, policies, Qs, Vs, ac
 
 
 # Acts and trains model
-def actor(rank, args, T, BEST, memory_queue, model_queue):
+def actor(rank, args, T, BEST, memory_queue, model_queue,p2):
     mp.set_sharing_strategy('file_system')
     # rlimit = resource.getrlimit(resource.RLIMIT_NOFILE)
     # resource.setrlimit(resource.RLIMIT_NOFILE, (args.nofile, rlimit[1]))
     torch.manual_seed(args.seed + rank)
+    print("Process {} fighting with {}".format(rank, p2))
     env = gym.make(args.env, java_env_path=".", port=args.port + rank * 2)
     env.seed(args.seed + rank)
     model = ActorCritic(env.observation_space, env.action_space, args.hidden_size)
@@ -217,7 +216,7 @@ def actor(rank, args, T, BEST, memory_queue, model_queue):
             # Reset environment and done flag
             try:
                 with timeout(seconds=30):
-                    s = env.reset(p2=args.p2)
+                    s = env.reset(p2=p2)
             except TimeoutError:
                 print("Time out to reset env")
                 env.close()

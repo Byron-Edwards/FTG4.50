@@ -33,11 +33,11 @@ parser.add_argument('--t-max', type=int, default=500, metavar='STEPS',
                     help='Max number of forward steps for A3C before update')
 parser.add_argument('--max-episode-length', type=int, default=500, metavar='LENGTH', help='Maximum episode length')
 parser.add_argument('--hidden-size', type=int, default=128, metavar='SIZE', help='Hidden size of LSTM cell')
-parser.add_argument('--model', default="OpenAI/ACER/checkpoint/model_LATEST", type=str, metavar='PARAMS',
+parser.add_argument('--model', default="", type=str, metavar='PARAMS',
                     help='Pretrained model (state dict)')
-parser.add_argument('--memory', default="OpenAI/ACER/checkpoint/memory_LATEST", type=str, metavar='PARAMS',
+parser.add_argument('--memory', default="", type=str, metavar='PARAMS',
                     help='Pretrained memory (state dict)')
-parser.add_argument('--data', default="OpenAI/ACER/checkpoint/indicator_LATEST", type=str, metavar='PARAMS',
+parser.add_argument('--data', default="", type=str, metavar='PARAMS',
                     help='Pretrained data (state dict)')
 parser.add_argument('--on-policy', action='store_true', help='Use pure on-policy training (A3C)')
 parser.add_argument('--memory-capacity', type=int, default=100000, metavar='CAPACITY',
@@ -53,11 +53,12 @@ parser.add_argument('--trust-region-decay', type=float, default=0.99, metavar='�
                     help='Average model weight decay rate')
 parser.add_argument('--trust-region-threshold', type=float, default=1, metavar='δ', help='Trust region threshold value')
 parser.add_argument('--reward-clip', action='store_true', help='Clip rewards to [-1, 1]')
-parser.add_argument('--lr', type=float, default=0.0001, metavar='η', help='Learning rate')
+parser.add_argument('--lr', type=float, default=1e-4, metavar='η', help='Learning rate')
 parser.add_argument('--lr-decay', default=True, action='store_true', help='Linearly decay learning rate to 0')
+parser.add_argument('--lr-min', default=1e-6, type=float, help='minimal learning rate')
 parser.add_argument('--rmsprop-decay', type=float, default=0.99, metavar='α', help='RMSprop decay factor')
 parser.add_argument('--batch-size', type=int, default=32, metavar='SIZE', help='Off-policy batch size')
-parser.add_argument('--entropy-weight', type=float, default=0.0001, metavar='β', help='Entropy regularisation weight')
+parser.add_argument('--entropy-weight', type=float, default=0.01, metavar='β', help='Entropy regularisation weight')
 parser.add_argument('--max-gradient-norm', type=float, default=40, metavar='VALUE', help='Gradient L2 normalisation')
 parser.add_argument('--evaluate', action='store_true', help='Evaluate only')
 parser.add_argument('--evaluation-interval', type=int, default=25000, metavar='STEPS',
@@ -65,7 +66,7 @@ parser.add_argument('--evaluation-interval', type=int, default=25000, metavar='S
 parser.add_argument('--evaluation-episodes', type=int, default=10, metavar='N',
                     help='Number of evaluation episodes to average over')
 parser.add_argument('--render', action='store_true', help='Render evaluation agent')
-parser.add_argument('--name', type=str, default='./OpenAI/ACER', help='Save folder')
+parser.add_argument('--name', type=str, default='./OpenAI/OpenAI_ACER', help='Save folder')
 parser.add_argument('--env', type=str, default='FightingiceDataNoFrameskip-v0', help='environment name')
 parser.add_argument('--port', type=int, default=4000, help='FightingICE running Port')
 parser.add_argument('--p2', type=str, default="RHEA_PI", help='FightingICE running Port')
@@ -94,7 +95,7 @@ if __name__ == '__main__':
     if not os.path.exists(save_dir):
         os.makedirs(save_dir)
 
-    tensorboard_dir = os.path.join(args.name, 'checkpoint',"runs",datetime.now().strftime("%Y%m%d-%H%M%S"))
+    tensorboard_dir = os.path.join(save_dir, "runs",datetime.now().strftime("%Y%m%d-%H%M%S"))
     if not os.path.exists(tensorboard_dir):
         os.makedirs(tensorboard_dir)
     print(' ' * 26 + 'Options')
@@ -126,6 +127,7 @@ if __name__ == '__main__':
     optimiser = SharedRMSprop(shared_model.parameters(), lr=args.lr, alpha=args.rmsprop_decay)
     env.close()
     scores = []
+    m_scores = []
     del env
 
     if args.model and os.path.isfile(args.model):
@@ -142,17 +144,20 @@ if __name__ == '__main__':
         T.set(torch.load(args.data)[0])
         BEST.set(torch.load(args.data)[1])
         scores = torch.load(args.data)[2]
+        m_scores = torch.load(args.data)[3]
         pre_best = BEST.value()
         print("Load data from CheckPoint {}, T: {}.BEST: {}".format(args.data, T.value(), BEST.value()))
 
     memory_queue = mp.SimpleQueue()
     model_queue = mp.SimpleQueue()
     processes = []
+    p2_list = ["ReiwaThunder", "RHEA_PI", "Toothless", "FalzAI"]
     if not args.evaluate:
         # Start training agents
         for rank in range(1, args.num_processes + 1):
             model_queue.put((shared_model.state_dict(), shared_average_model.state_dict()))
-            p = mp.Process(target=actor, args=(rank, args, T, BEST, memory_queue, model_queue))
+            p2 = p2_list[(rank - 1) % len(p2_list)]
+            p = mp.Process(target=actor, args=(rank, args, T, BEST, memory_queue, model_queue, p2))
             p.start()
             print('Process ' + str(rank) + ' started')
             processes.append(p)
@@ -175,6 +180,7 @@ if __name__ == '__main__':
         memory.append_trajectory(trajectory)
         scores.append(round_score)
         m_score = np.mean(scores[-100:])
+        m_scores.append(m_score)
         if m_score * 400 > BEST.value():
             BEST.set(int(m_score * 400))
             best = BEST.value()
@@ -191,11 +197,10 @@ if __name__ == '__main__':
         if best > pre_best:
             print("Save BEST model!")
             torch.save(model.state_dict(),
-                       os.path.join("OpenAI/ACER/checkpoint/", 'model_{}'.format("BEST")))  # Save model params
-            torch.save(memory,
-                       os.path.join("OpenAI/ACER/checkpoint/", 'memory_{}'.format("BEST")))  # Save memory
-            torch.save((t, best, scores),
-                       os.path.join("OpenAI/ACER/checkpoint/", 'indicator_{}'.format("BEST")))  # Save data
+                       os.path.join(save_dir, 'model_{}'.format("BEST")))  # Save model params
+            memory.save(os.path.join(save_dir,"memory"))
+            torch.save((t, best, scores, m_scores),
+                       os.path.join(save_dir, 'indicator_{}'.format("BEST")))  # Save data
             pre_best = best
 
         # deliver model from learner to actor and save the latest model
@@ -211,9 +216,8 @@ if __name__ == '__main__':
                 model_queue.put((shared_model_dict, shared_average_model_dict),)
             print("Saving LATEST model......")
             torch.save(model.state_dict(),
-                       os.path.join("OpenAI/ACER/checkpoint/", 'model_{}'.format("LATEST",)))  # Save model params
-            torch.save(memory,
-                       os.path.join("OpenAI/ACER/checkpoint/", 'memory_{}'.format("LATEST",)))  # Save memory
-            torch.save((t, best, scores),
-                       os.path.join("OpenAI/ACER/checkpoint/", 'indicator_{}'.format("LATEST",)))  # Save data
+                       os.path.join(save_dir, 'model_{}'.format("LATEST",)))  # Save model params
+            memory.save(os.path.join(save_dir,"memory"))
+            torch.save((t, best, scores, m_scores),
+                       os.path.join(save_dir, 'indicator_{}'.format("LATEST",)))  # Save data
             print("Save LATEST model!!!!!!")

@@ -31,23 +31,24 @@ parser.add_argument('--num-processes', type=int, default=4, metavar='N', help='N
 parser.add_argument('--T-max', type=int, default=10e7, metavar='STEPS', help='Number of training steps')
 parser.add_argument('--t-max', type=int, default=300, metavar='STEPS', help='Max number of forward steps for A3C before update')
 parser.add_argument('--max-episode-length', type=int, default=1000, metavar='LENGTH', help='Maximum episode length')
-parser.add_argument('--hidden-size', type=int, default=32, metavar='SIZE', help='Hidden size of LSTM cell')
-parser.add_argument('--model',default="./OpenAI/ACER/checkpoint/model_LATEST",type=str, metavar='PARAMS', help='Pretrained model (state dict)')
+parser.add_argument('--hidden-size', type=int, default=128, metavar='SIZE', help='Hidden size of LSTM cell')
+parser.add_argument('--model',default="",type=str, metavar='PARAMS', help='Pretrained model (state dict)')
 parser.add_argument('--memory',default="./OpenAI/ACER/checkpoint/memory", type=str, metavar='PARAMS', help='Pretrained model (state dict)')
-parser.add_argument('--data',default="./OpenAI/ACER/checkpoint/indicator_LATEST", type=str, metavar='PARAMS', help='Pretrained model (state dict)')
+parser.add_argument('--data',default="", type=str, metavar='PARAMS', help='Pretrained model (state dict)')
 parser.add_argument('--on-policy', action='store_true', help='Use pure on-policy training (A3C)')
-parser.add_argument('--memory-capacity', type=int, default=100000, metavar='CAPACITY', help='Experience replay memory capacity')
+parser.add_argument('--memory-capacity', type=int, default=10000, metavar='CAPACITY', help='Experience replay memory capacity')
 parser.add_argument('--replay-ratio', type=int, default=4, metavar='r', help='Ratio of off-policy to on-policy updates')
-parser.add_argument('--replay_start', type=int, default=1000, metavar='EPISODES', help='Number of transitions to save before starting off-policy training')
+parser.add_argument('--replay_start', type=int, default=10000, metavar='EPISODES', help='Number of transitions to save before starting off-policy training')
 parser.add_argument('--discount', type=float, default=0.99, metavar='γ', help='Discount factor')
 parser.add_argument('--trace-decay', type=float, default=1, metavar='λ', help='Eligibility trace decay factor')
 parser.add_argument('--trace-max', type=float, default=10, metavar='c', help='Importance weight truncation (max) value')
 parser.add_argument('--reward-clip', action='store_true', help='Clip rewards to [-1, 1]')
 parser.add_argument('--lr', type=float, default=0.0001, metavar='η', help='Learning rate')
 parser.add_argument('--lr-decay', default=True, action='store_true', help='Linearly decay learning rate to 0')
+parser.add_argument('--lr-min', default=1e-6, type=float, help='minimal learning rate')
 parser.add_argument('--rmsprop-decay', type=float, default=0.99, metavar='α', help='RMSprop decay factor')
 parser.add_argument('--batch-size', type=int, default=16, metavar='SIZE', help='Off-policy batch size')
-parser.add_argument('--entropy-weight', type=float, default=0.001, metavar='β', help='Entropy regularisation weight')
+parser.add_argument('--entropy-weight', type=float, default=0.01, metavar='β', help='Entropy regularisation weight')
 parser.add_argument('--max-gradient-norm', type=float, default=40, metavar='VALUE', help='Gradient L2 normalisation')
 parser.add_argument('--evaluate', action='store_true', help='Evaluate only')
 parser.add_argument('--evaluation-interval', type=int, default=25000, metavar='STEPS', help='Number of training steps between evaluations (roughly)')
@@ -128,9 +129,6 @@ class ReplayBuffer():
         self.checkpoint = self.size()
 
 
-
-
-
 class ActorCritic(nn.Module):
     def __init__(self,observation_space, action_space, hidden_size):
         super(ActorCritic, self).__init__()
@@ -139,15 +137,18 @@ class ActorCritic(nn.Module):
         self.fc1 = nn.Sequential(
             nn.Linear(self.state_size, hidden_size),
             nn.LeakyReLU(),
-            nn.Linear(hidden_size, hidden_size),
-            nn.LeakyReLU(),
-            nn.Linear(hidden_size, hidden_size),
-            nn.LeakyReLU(),
-            nn.Linear(hidden_size, hidden_size),
-            nn.LeakyReLU(),
         )
-        self.fc_pi = nn.Linear(hidden_size, self.action_size)
-        self.fc_q = nn.Linear(hidden_size, self.action_size)
+        self.lstm = nn.LSTM(hidden_size, hidden_size)
+        self.fc_pi = nn.Sequential(
+            nn.Linear(hidden_size, hidden_size),
+            nn.LeakyReLU(),
+            nn.Linear(hidden_size, self.action_size),
+        )
+        self.fc_q = nn.Sequential(
+            nn.Linear(hidden_size, hidden_size),
+            nn.LeakyReLU(),
+            nn.Linear(hidden_size, self.action_size),
+        )
 
     def pi(self, x, action_mask, softmax_dim=0):
         x = self.fc1(x)
@@ -179,15 +180,6 @@ class timeout:
     def __exit__(self, type, value, traceback):
         signal.alarm(0)
 
-
-def noisy_linear_cosine_decay(learning_rate, global_step, decay_steps, initial_variance=1.0, variance_decay=0.55,
-                              num_periods=0.5, alpha=0.0, beta=0.001, name=None):
-    global_step = min(global_step, decay_steps)
-    eps_t = 0
-    linear_decay = (decay_steps - global_step) / decay_steps
-    cosine_decay = 0.5 * (1 + torch.cos(math.pi * 2 * num_periods * global_step / decay_steps))
-    decayed = (alpha + linear_decay + eps_t) * cosine_decay + beta
-    decayed_learning_rate = learning_rate * decayed
 
 class Counter():
     def __init__(self):
@@ -259,7 +251,7 @@ def train(model, t, optimizer, memory, on_policy=False, device=torch.device("cud
         for param_group in optimizer.param_groups:
             param_group['lr'] = max(args.lr
                                     # * (0.8 ** (n_bounce + 1))
-                                    * (0.5**((t-t_bounce)/2000)), 1e-6)
+                                    * (0.5**((t-t_bounce)/2000)), args.lr_min)
             lr = param_group['lr']
 
     writer.add_scalar("loss/policy_loss", policy_loss.mean().detach(), t)
@@ -372,6 +364,7 @@ if __name__ == '__main__':
     model.to(device)
     optimizer = optim.Adam(model.parameters(), lr=args.lr)
     scores = []
+    m_scores = []
     env.close()
     del env
 
@@ -407,7 +400,7 @@ if __name__ == '__main__':
             processes.append(p)
 
     c_t = 0
-    m_scores = []
+
     t_bounce, n_bounce = 0,0
     # Learner Loop
     while T.value() <= args.T_max:
@@ -426,14 +419,6 @@ if __name__ == '__main__':
         scores.append(round_score)
         m_score = np.mean(scores[-100:])
         m_scores.append(m_score)
-        # if len(m_scores) >= args.replay_start:
-        #     lr_bounce = (m_score <= min(m_scores[-50:])
-        #                  and m_score <= min(m_scores[-100:])
-        #                  and m_score <= min(m_scores[-200:])
-        #                  )
-        #     if lr_bounce and t - t_bounce >= 1000:
-        #         n_bounce += 1
-        #         t_bounce = t
         if m_score * 400 > BEST.value() and len(scores) >= args.replay_start:
             BEST.set(int(m_score * 400))
             best = BEST.value()
@@ -443,7 +428,8 @@ if __name__ == '__main__':
         writer.add_scalar("indicator/episode_length", episode_length, t)
         print("EPISODE: {}, BEST: {}, MEAN_SCORE: {}".format(t, best, m_score))
         train(model, t, optimizer, memory, on_policy=True, device=device)
-        if memory.size() > args.replay_start:
+        if memory.size() >= args.replay_start:
+            # for _ in range(args.replay_ratio):
             train(model, t, optimizer, memory, device=device)
 
         # save the best model
