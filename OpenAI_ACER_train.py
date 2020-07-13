@@ -33,11 +33,11 @@ parser.add_argument('--t-max', type=int, default=500, metavar='STEPS',
                     help='Max number of forward steps for A3C before update')
 parser.add_argument('--max-episode-length', type=int, default=500, metavar='LENGTH', help='Maximum episode length')
 parser.add_argument('--hidden-size', type=int, default=128, metavar='SIZE', help='Hidden size of LSTM cell')
-parser.add_argument('--model', default="", type=str, metavar='PARAMS',
+parser.add_argument('--model', default="./OpenAI/OpenAI_ACER/checkpoint/model_LATEST", type=str, metavar='PARAMS',
                     help='Pretrained model (state dict)')
-parser.add_argument('--memory', default="", type=str, metavar='PARAMS',
+parser.add_argument('--memory', default="./OpenAI/OpenAI_ACER/checkpoint/memory", type=str, metavar='PARAMS',
                     help='Pretrained memory (state dict)')
-parser.add_argument('--data', default="", type=str, metavar='PARAMS',
+parser.add_argument('--data', default="./OpenAI/OpenAI_ACER/checkpoint/indicator_LATEST", type=str, metavar='PARAMS',
                     help='Pretrained data (state dict)')
 parser.add_argument('--on-policy', action='store_true', help='Use pure on-policy training (A3C)')
 parser.add_argument('--memory-capacity', type=int, default=100000, metavar='CAPACITY',
@@ -47,18 +47,18 @@ parser.add_argument('--replay-start', type=int, default=1000, metavar='EPISODES'
                     help='Number of transitions to save before starting off-policy training')
 parser.add_argument('--discount', type=float, default=0.99, metavar='γ', help='Discount factor')
 parser.add_argument('--trace-decay', type=float, default=1, metavar='λ', help='Eligibility trace decay factor')
-parser.add_argument('--trace-max', type=float, default=1, metavar='c', help='Importance weight truncation (max) value')
+parser.add_argument('--trace-max', type=float, default=10, metavar='c', help='Importance weight truncation (max) value')
 parser.add_argument('--trust-region', default=True, action='store_true', help='Use trust region')
 parser.add_argument('--trust-region-decay', type=float, default=0.99, metavar='α',
                     help='Average model weight decay rate')
 parser.add_argument('--trust-region-threshold', type=float, default=1, metavar='δ', help='Trust region threshold value')
 parser.add_argument('--reward-clip', action='store_true', help='Clip rewards to [-1, 1]')
 parser.add_argument('--lr', type=float, default=1e-4, metavar='η', help='Learning rate')
-parser.add_argument('--lr-decay', default=True, action='store_true', help='Linearly decay learning rate to 0')
+parser.add_argument('--lr-decay', default=False, action='store_true', help='Linearly decay learning rate to 0')
 parser.add_argument('--lr-min', default=1e-6, type=float, help='minimal learning rate')
 parser.add_argument('--rmsprop-decay', type=float, default=0.99, metavar='α', help='RMSprop decay factor')
 parser.add_argument('--batch-size', type=int, default=32, metavar='SIZE', help='Off-policy batch size')
-parser.add_argument('--entropy-weight', type=float, default=0.01, metavar='β', help='Entropy regularisation weight')
+parser.add_argument('--entropy-weight', type=float, default=0.001, metavar='β', help='Entropy regularisation weight')
 parser.add_argument('--max-gradient-norm', type=float, default=40, metavar='VALUE', help='Gradient L2 normalisation')
 parser.add_argument('--evaluate', action='store_true', help='Evaluate only')
 parser.add_argument('--evaluation-interval', type=int, default=25000, metavar='STEPS',
@@ -95,7 +95,7 @@ if __name__ == '__main__':
     if not os.path.exists(save_dir):
         os.makedirs(save_dir)
 
-    tensorboard_dir = os.path.join(save_dir, "runs",datetime.now().strftime("%Y%m%d-%H%M%S"))
+    tensorboard_dir = os.path.join(save_dir, "runs", datetime.now().strftime("%Y%m%d-%H%M%S"))
     if not os.path.exists(tensorboard_dir):
         os.makedirs(tensorboard_dir)
     print(' ' * 26 + 'Options')
@@ -137,8 +137,8 @@ if __name__ == '__main__':
         average_model.load_state_dict(torch.load(args.model))
         shared_model.load_state_dict(torch.load(args.model, map_location="cpu"))
         shared_average_model.load_state_dict(torch.load(args.model, map_location="cpu"))
-    if args.memory and os.path.isfile(args.memory):
-        memory = torch.load(args.memory)
+    if args.memory and os.path.isdir(args.memory):
+        memory.load(args.memory)
         print("Load memory from CheckPoint {}, memory len: {}".format(args.memory, len(memory)))
     if args.data and os.path.isfile(args.data):
         T.set(torch.load(args.data)[0])

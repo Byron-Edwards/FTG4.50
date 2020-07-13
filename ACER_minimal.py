@@ -33,7 +33,7 @@ parser.add_argument('--t-max', type=int, default=300, metavar='STEPS', help='Max
 parser.add_argument('--max-episode-length', type=int, default=1000, metavar='LENGTH', help='Maximum episode length')
 parser.add_argument('--hidden-size', type=int, default=128, metavar='SIZE', help='Hidden size of LSTM cell')
 parser.add_argument('--model',default="",type=str, metavar='PARAMS', help='Pretrained model (state dict)')
-parser.add_argument('--memory',default="./OpenAI/ACER/checkpoint/memory", type=str, metavar='PARAMS', help='Pretrained model (state dict)')
+parser.add_argument('--memory',default="", type=str, metavar='PARAMS', help='Pretrained model (state dict)')
 parser.add_argument('--data',default="", type=str, metavar='PARAMS', help='Pretrained model (state dict)')
 parser.add_argument('--on-policy', action='store_true', help='Use pure on-policy training (A3C)')
 parser.add_argument('--memory-capacity', type=int, default=10000, metavar='CAPACITY', help='Experience replay memory capacity')
@@ -42,6 +42,10 @@ parser.add_argument('--replay_start', type=int, default=10000, metavar='EPISODES
 parser.add_argument('--discount', type=float, default=0.99, metavar='γ', help='Discount factor')
 parser.add_argument('--trace-decay', type=float, default=1, metavar='λ', help='Eligibility trace decay factor')
 parser.add_argument('--trace-max', type=float, default=10, metavar='c', help='Importance weight truncation (max) value')
+parser.add_argument('--trust-region', default=True, action='store_true', help='Use trust region')
+parser.add_argument('--trust-region-decay', type=float, default=0.99, metavar='α',
+                    help='Average model weight decay rate')
+parser.add_argument('--trust-region-threshold', type=float, default=1, metavar='δ', help='Trust region threshold value')
 parser.add_argument('--reward-clip', action='store_true', help='Clip rewards to [-1, 1]')
 parser.add_argument('--lr', type=float, default=0.0001, metavar='η', help='Learning rate')
 parser.add_argument('--lr-decay', default=True, action='store_true', help='Linearly decay learning rate to 0')
@@ -54,7 +58,7 @@ parser.add_argument('--evaluate', action='store_true', help='Evaluate only')
 parser.add_argument('--evaluation-interval', type=int, default=25000, metavar='STEPS', help='Number of training steps between evaluations (roughly)')
 parser.add_argument('--evaluation-episodes', type=int, default=20, metavar='N', help='Number of evaluation episodes to average over')
 parser.add_argument('--render', action='store_true', help='Render evaluation agent')
-parser.add_argument('--name', type=str, default='./OpenAI/ACER', help='Save folder')
+parser.add_argument('--name', type=str, default='./OpenAI/ACER_mini_trust', help='Save folder')
 parser.add_argument('--env', type=str, default='FightingiceDataNoFrameskip-v0',help='environment name')
 parser.add_argument('--port', type=int, default=5000,help='FightingICE running Port')
 parser.add_argument('--p2', type=str, default="RHEA_PI",help='FightingICE running Port')
@@ -68,6 +72,8 @@ class ReplayBuffer():
 
     def put(self, seq_data):
         self.buffer.append(seq_data)
+        if self.size() == args.memory_capacity:
+            self.checkpoint -= 1
 
     def sample(self, on_policy=False):
         if on_policy:
@@ -162,6 +168,15 @@ class ActorCritic(nn.Module):
         return q
 
 
+# Knuth's algorithm for generating Poisson samples
+def _poisson(lmbd):
+    L, k, p = math.exp(-lmbd), 0, 1
+    while p > L:
+        k += 1
+        p *= random.uniform(0, 1)
+    return max(k - 1, 0)
+
+
 class TimeoutError(Exception): pass
 
 
@@ -199,7 +214,7 @@ class Counter():
             return self.val.value
 
 
-def train(model, t, optimizer, memory, on_policy=False, device=torch.device("cuda")):
+def train(model, average_model, t, optimizer, memory, on_policy=False, device=torch.device("cuda")):
     print("Training {}".format("on-policy" if on_policy else "off-policy"))
     s, a, r, prob, done_mask, is_first, action_mask = memory.sample(on_policy)
     s = s.to(device)
@@ -212,7 +227,9 @@ def train(model, t, optimizer, memory, on_policy=False, device=torch.device("cud
     q = model.q(s)
     q_a = q.gather(1, a)
     pi = model.pi(s, action_mask, softmax_dim=1)
+    avg_pi = average_model.pi(s, action_mask, softmax_dim=1)
     pi_a = pi.gather(1, a)
+    avg_pi_a = avg_pi.gather(1, a)
     v = (q * pi).sum(1).unsqueeze(1).detach()
 
     rho = (pi.detach() / prob)
@@ -235,8 +252,27 @@ def train(model, t, optimizer, memory, on_policy=False, device=torch.device("cud
 
     loss1 = -rho_bar * torch.log(pi_a) * (q_ret - v)
     loss2 = -correction_coeff * pi.detach() * torch.log(pi) * (q.detach() - v)  # bias correction term
+    trust_loss = 0
+    if args.trust_region:
+        # KL divergence k ← ∇θ0∙DKL[π(∙|s_i; θ_a) || π(∙|s_i; θ)]
+        k = -avg_pi_a / pi_a
+
+        g = (rho_bar * (q_ret - v) / pi_a + (correction_coeff * pi * (q_a - v) / pi).sum(1)).detach()
+        # Policy update dθ ← dθ + ∂θ/∂θ∙z*
+        kl = - (avg_pi_a * (pi_a.log() - avg_pi_a.log())).sum(1).mean(0)
+        # Compute dot products of gradients
+        k_dot_g = (k * g).sum(1).mean(0)
+        k_dot_k = (k ** 2).sum(1).mean(0)
+        # Compute trust region update
+        if k_dot_k.item() > 0:
+            trust_factor = ((k_dot_g - args.trust_region_threshold) / k_dot_k).clamp(min=0).detach()
+        else:
+            trust_factor = torch.zeros(1).to(device)
+        # z* = g - max(0, (k^T∙g - δ) / ||k||^2_2)∙k
+        trust_loss = trust_factor * kl
+
     entropy_reg = args.entropy_weight * -(torch.log(pi) * pi).sum(1)
-    policy_loss = loss1 + loss2.sum(1) - entropy_reg
+    policy_loss = loss1 + loss2.sum(1) + trust_loss - entropy_reg
     value_loss = F.smooth_l1_loss(q_a, q_ret)
     loss = policy_loss + value_loss
 
@@ -253,6 +289,9 @@ def train(model, t, optimizer, memory, on_policy=False, device=torch.device("cud
                                     # * (0.8 ** (n_bounce + 1))
                                     * (0.5**((t-t_bounce)/2000)), args.lr_min)
             lr = param_group['lr']
+
+    for model_param, average_param in zip(model.parameters(), average_model.parameters()):
+        average_param.data = args.trust_region_decay * average_param.data + (1 - args.trust_region_decay) * model_param.data
 
     writer.add_scalar("loss/policy_loss", policy_loss.mean().detach(), t)
     writer.add_scalar("loss/value_loss", value_loss.mean().detach(), t)
@@ -343,7 +382,7 @@ if __name__ == '__main__':
             print(' ' * 26 + k + ': ' + str(v))
             f.write(k + ' : ' + str(v) + '\n')
 
-    tensorboard_dir = os.path.join(args.name, 'checkpoint',"runs",datetime.now().strftime("%Y%m%d-%H%M%S"))
+    tensorboard_dir = os.path.join(save_dir, "runs",datetime.now().strftime("%Y%m%d-%H%M%S"))
     if not os.path.exists(tensorboard_dir):
         os.makedirs(tensorboard_dir)
 
@@ -361,7 +400,9 @@ if __name__ == '__main__':
     env = gym.make(args.env, java_env_path=".", port=args.port)
     model = ActorCritic(env.observation_space, env.action_space, args.hidden_size)
     shared_model = copy.deepcopy(model)
+    average_model = copy.deepcopy(model)
     model.to(device)
+    average_model.to(device)
     optimizer = optim.Adam(model.parameters(), lr=args.lr)
     scores = []
     m_scores = []
@@ -427,19 +468,19 @@ if __name__ == '__main__':
         writer.add_scalar("indicator/entropy", average_entropy, t)
         writer.add_scalar("indicator/episode_length", episode_length, t)
         print("EPISODE: {}, BEST: {}, MEAN_SCORE: {}".format(t, best, m_score))
-        train(model, t, optimizer, memory, on_policy=True, device=device)
+        train(model, average_model, t, optimizer, memory, on_policy=True, device=device)
         if memory.size() >= args.replay_start:
-            # for _ in range(args.replay_ratio):
-            train(model, t, optimizer, memory, device=device)
+            for _ in range(_poisson(args.replay_ratio)):
+                train(model, average_model, t, optimizer, memory, device=device)
 
         # save the best model
         if best > pre_best:
             print("Save BEST model!")
             torch.save(model.state_dict(),
-                       os.path.join("OpenAI/ACER/checkpoint/", 'model_{}'.format("BEST")))  # Save model params
-            memory.save(args.memory)
-            torch.save((t, best, scores,m_scores),
-                       os.path.join("OpenAI/ACER/checkpoint/", 'indicator_{}'.format("BEST")))  # Save data
+                       os.path.join(save_dir, 'model_{}'.format("BEST")))  # Save model params
+            memory.save(os.path.join(save_dir,"memory"))
+            torch.save((t, best, scores, m_scores),
+                       os.path.join(save_dir, 'indicator_{}'.format("BEST")))  # Save data
             pre_best = best
 
         # deliver model from learner to actor and save the latest model
@@ -452,8 +493,8 @@ if __name__ == '__main__':
                 model_queue.put(shared_model_dict,)
             print("Saving LATEST model......")
             torch.save(model.state_dict(),
-                       os.path.join("OpenAI/ACER/checkpoint/", 'model_{}'.format("LATEST",)))  # Save model params
-            memory.save(args.memory)
-            torch.save((t, best, scores,m_scores),
-                       os.path.join("OpenAI/ACER/checkpoint/", 'indicator_{}'.format("LATEST",)))  # Save data
+                       os.path.join(save_dir, 'model_{}'.format("LATEST",)))  # Save model params
+            memory.save(os.path.join(save_dir,"memory"))
+            torch.save((t, best, scores, m_scores),
+                       os.path.join(save_dir, 'indicator_{}'.format("LATEST",)))  # Save data
             print("Save LATEST model!!!!!!")
