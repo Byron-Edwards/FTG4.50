@@ -10,10 +10,9 @@ docker run -it \
 --net=host \
 --privileged=true \
 --rm=true \
--e DISPLAY \
+-e DISPLAY=:0 \
 -v /tmp/.X11-unix:/tmp/.X11-unix \
--v /home/byron/Repos/FTG4.50:/workspace      \
-recipe-wiz:latest
+byronedwards/ftg_450
 
 # Kill X11 Server
 #pkill xinit

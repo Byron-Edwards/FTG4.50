@@ -76,18 +76,27 @@ COPY ./requirements/xstartup.turbovnc /root/.vnc/xstartup.turbovnc
 RUN chmod a+x /root/.vnc/xstartup.turbovnc
 
 # Install Sound ASLA and Pulse and setup sound
-RUN DEBIAN_FRONTEND=noninteractive apt-get -qq update && DEBIAN_FRONTEND=noninteractive apt-get -qq install -y pulseaudio pavucontrol && DEBIAN_FRONTEND=noninteractive apt update && apt-get install -y openjdk-8-jdk python3  python3-pip unzip && pip3 install numpy gym py4j port_for opencv-python && pip3 install torch==1.5.1+cu101 torchvision==0.6.1+cu101 -f https://download.pytorch.org/whl/torch_stable.html && pip3 install tensorboard && wget http://www.ice.ci.ritsumei.ac.jp/~ftgaic/Downloadfiles/FTG4.50.zip && git clone -b ACER https://github.com/Byron-Edwards/FTG4.50.git  && unzip FTG4.50.zip && cd FTG4.50 && git clone https://github.com/Byron-Edwards/Gym-FightingICE.git && cd Gym-FightingICE && pip3 install -e .
-
-
+RUN DEBIAN_FRONTEND=noninteractive apt-get -qq update \
+&& DEBIAN_FRONTEND=noninteractive apt-get -qq install -y pulseaudio pavucontrol \
+&& DEBIAN_FRONTEND=noninteractive apt update \
+&& apt-get install -y openjdk-8-jdk python3  python3-pip unzip makedev \
+&& pip3 install numpy gym py4j port_for opencv-python \
+&& pip3 install torch==1.5.1+cu101 torchvision==0.6.1+cu101 -f https://download.pytorch.org/whl/torch_stable.html \
+&& pip3 install tensorboard \
+&& wget http://www.ice.ci.ritsumei.ac.jp/~ftgaic/Downloadfiles/FTG4.50.zip \
+&& git clone -b ACER https://github.com/Byron-Edwards/FTG4.50.git  \
+&& unzip FTG4.50.zip \
+&& cd FTG4.50 \
+&& git clone https://github.com/Byron-Edwards/Gym-FightingICE.git \
+&& cd Gym-FightingICE \
+&& pip3 install -e .
 
 #---------------------------------------------------------------------
 # Startup
 #---------------------------------------------------------------------
 COPY requirements/launch.sh /opt/noVNC/utils/launch.sh
 COPY requirements/start_desktop.sh /usr/local/bin/start_desktop.sh
+COPY requirements/setup_device.sh /setup_device.sh
+RUN chmod +x /setup_device.sh
 
-# Uncomment for autostart of the VNC server
-#CMD /usr/local/bin/start_desktop.sh
-#  pulseaudio -D --exit-idle-time=-1 && pactl load-module module-null-sink sink_name=SpeakerOutput sink_properties=device.description="Dummy_Output" 
 
-CMD /bin/bash
