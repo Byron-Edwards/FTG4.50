@@ -19,6 +19,7 @@ from datetime import datetime
 from torch.utils.tensorboard import SummaryWriter
 from torch.distributions import Categorical
 from collections import deque, namedtuple
+from OpenAI.atari_wrappers import FrameStack
 # Characteristics
 # 1. Discrete action space, single thread version.
 # 2. Does not support trust-region updates.
@@ -31,18 +32,18 @@ parser.add_argument('--num-processes', type=int, default=4, metavar='N', help='N
 parser.add_argument('--T-max', type=int, default=10e7, metavar='STEPS', help='Number of training steps')
 parser.add_argument('--t-max', type=int, default=300, metavar='STEPS', help='Max number of forward steps for A3C before update')
 parser.add_argument('--max-episode-length', type=int, default=1000, metavar='LENGTH', help='Maximum episode length')
-parser.add_argument('--hidden-size', type=int, default=128, metavar='SIZE', help='Hidden size of LSTM cell')
+parser.add_argument('--hidden-size', type=int, default=256, metavar='SIZE', help='Hidden size of LSTM cell')
 parser.add_argument('--model',default="",type=str, metavar='PARAMS', help='Pretrained model (state dict)')
 parser.add_argument('--memory',default="", type=str, metavar='PARAMS', help='Pretrained model (state dict)')
 parser.add_argument('--data',default="", type=str, metavar='PARAMS', help='Pretrained model (state dict)')
 parser.add_argument('--on-policy', action='store_true', help='Use pure on-policy training (A3C)')
-parser.add_argument('--memory-capacity', type=int, default=10000, metavar='CAPACITY', help='Experience replay memory capacity')
+parser.add_argument('--memory-capacity', type=int, default=5000, metavar='CAPACITY', help='Experience replay memory capacity')
 parser.add_argument('--replay-ratio', type=int, default=4, metavar='r', help='Ratio of off-policy to on-policy updates')
-parser.add_argument('--replay_start', type=int, default=10000, metavar='EPISODES', help='Number of transitions to save before starting off-policy training')
+parser.add_argument('--replay_start', type=int, default=5000, metavar='EPISODES', help='Number of transitions to save before starting off-policy training')
 parser.add_argument('--discount', type=float, default=0.99, metavar='γ', help='Discount factor')
 parser.add_argument('--trace-decay', type=float, default=1, metavar='λ', help='Eligibility trace decay factor')
 parser.add_argument('--trace-max', type=float, default=10, metavar='c', help='Importance weight truncation (max) value')
-parser.add_argument('--trust-region', default=True, action='store_true', help='Use trust region')
+parser.add_argument('--trust-region', default=False, action='store_true', help='Use trust region')
 parser.add_argument('--trust-region-decay', type=float, default=0.99, metavar='α',
                     help='Average model weight decay rate')
 parser.add_argument('--trust-region-threshold', type=float, default=1, metavar='δ', help='Trust region threshold value')
@@ -51,15 +52,15 @@ parser.add_argument('--lr', type=float, default=0.0001, metavar='η', help='Lear
 parser.add_argument('--lr-decay', default=True, action='store_true', help='Linearly decay learning rate to 0')
 parser.add_argument('--lr-min', default=1e-6, type=float, help='minimal learning rate')
 parser.add_argument('--rmsprop-decay', type=float, default=0.99, metavar='α', help='RMSprop decay factor')
-parser.add_argument('--batch-size', type=int, default=16, metavar='SIZE', help='Off-policy batch size')
+parser.add_argument('--batch-size', type=int, default=8, metavar='SIZE', help='Off-policy batch size')
 parser.add_argument('--entropy-weight', type=float, default=0.01, metavar='β', help='Entropy regularisation weight')
-parser.add_argument('--max-gradient-norm', type=float, default=40, metavar='VALUE', help='Gradient L2 normalisation')
+parser.add_argument('--max-gradient-norm', type=float, default=10, metavar='VALUE', help='Gradient L2 normalisation')
 parser.add_argument('--evaluate', action='store_true', help='Evaluate only')
 parser.add_argument('--evaluation-interval', type=int, default=25000, metavar='STEPS', help='Number of training steps between evaluations (roughly)')
 parser.add_argument('--evaluation-episodes', type=int, default=20, metavar='N', help='Number of evaluation episodes to average over')
 parser.add_argument('--render', action='store_true', help='Render evaluation agent')
-parser.add_argument('--name', type=str, default='./OpenAI/ACER_mini_trust', help='Save folder')
-parser.add_argument('--env', type=str, default='FightingiceDataNoFrameskip-v0',help='environment name')
+parser.add_argument('--name', type=str, default='./OpenAI/Atari', help='Save folder')
+parser.add_argument('--env', type=str, default='Pong-ram-v0',help='environment name')
 parser.add_argument('--port', type=int, default=5000,help='FightingICE running Port')
 parser.add_argument('--p2', type=str, default="RHEA_PI",help='FightingICE running Port')
 args = parser.parse_args()
@@ -138,7 +139,7 @@ class ReplayBuffer():
 class ActorCritic(nn.Module):
     def __init__(self,observation_space, action_space, hidden_size):
         super(ActorCritic, self).__init__()
-        self.state_size = observation_space.shape[0]
+        self.state_size = observation_space
         self.action_size = action_space.n
         self.fc1 = nn.Sequential(
             nn.Linear(self.state_size, hidden_size),
@@ -214,6 +215,23 @@ class Counter():
             return self.val.value
 
 
+def flip_obs(s):
+    my_info = s[0:74]
+    opp_info = s[74:148]
+    game_frame = s[148]
+    my_attack = s[149:199]
+    opp_attack = s[199:249]
+    flip_s = opp_info + my_info + game_frame + opp_attack + my_attack
+    return flip_s
+
+
+def obs_get_action(s):
+    my_action = s[14:70]
+    for i in range(len(my_action)):
+        if my_action[i] == 1:
+            return i
+
+
 def train(model, average_model, t, optimizer, memory, on_policy=False, device=torch.device("cuda")):
     print("Training {}".format("on-policy" if on_policy else "off-policy"))
     s, a, r, prob, done_mask, is_first, action_mask = memory.sample(on_policy)
@@ -227,10 +245,12 @@ def train(model, average_model, t, optimizer, memory, on_policy=False, device=to
     q = model.q(s)
     q_a = q.gather(1, a)
     pi = model.pi(s, action_mask, softmax_dim=1)
-    avg_pi = average_model.pi(s, action_mask, softmax_dim=1)
     pi_a = pi.gather(1, a)
-    avg_pi_a = avg_pi.gather(1, a)
     v = (q * pi).sum(1).unsqueeze(1).detach()
+
+    if args.trust_region:
+        avg_pi = average_model.pi(s, action_mask, softmax_dim=1)
+        avg_pi_a = avg_pi.gather(1, a)
 
     rho = (pi.detach() / prob)
     rho_a = rho.gather(1, a)
@@ -250,34 +270,34 @@ def train(model, average_model, t, optimizer, memory, on_policy=False, device=to
     q_ret_lst.reverse()
     q_ret = torch.tensor(q_ret_lst, dtype=torch.float).unsqueeze(1).to(device)
 
-    loss1 = -rho_bar * torch.log(pi_a) * (q_ret - v)
-    loss2 = -correction_coeff * pi.detach() * torch.log(pi) * (q.detach() - v)  # bias correction term
-    trust_loss = 0
+    loss1 = -(rho_bar * (q_ret - v)).detach() * pi_a.log()
+    loss2 = -pi.log() * (correction_coeff * pi * (q - v)).detach()  # bias correction term
+    entropy_reg = args.entropy_weight * -(torch.log(pi) * pi).sum(1)
+    policy_loss = loss1 + loss2.sum(1) - entropy_reg
+    value_loss = F.smooth_l1_loss(q_a, q_ret.detach())
+    optimizer.zero_grad()
+
     if args.trust_region:
         # KL divergence k ← ∇θ0∙DKL[π(∙|s_i; θ_a) || π(∙|s_i; θ)]
-        k = -avg_pi_a / pi_a
-
-        g = (rho_bar * (q_ret - v) / pi_a + (correction_coeff * pi * (q_a - v) / pi).sum(1)).detach()
+        k = -avg_pi / pi
+        g = torch.autograd.grad(-policy_loss.mean(), pi)[0]
+        # g = (rho_bar * (q_ret - v) / pi_a + (correction_coeff * pi * (q_a - v) / pi).sum(1)).detach()
         # Policy update dθ ← dθ + ∂θ/∂θ∙z*
-        kl = - (avg_pi_a * (pi_a.log() - avg_pi_a.log())).sum(1).mean(0)
+        # kl = - (avg_pi_a * (pi_a.log() - avg_pi_a.log())).sum(1).mean(0)
         # Compute dot products of gradients
         k_dot_g = (k * g).sum(1).mean(0)
-        k_dot_k = (k ** 2).sum(1).mean(0)
+        k_dot_k = (k * k).sum(1).mean(0)
         # Compute trust region update
-        if k_dot_k.item() > 0:
-            trust_factor = ((k_dot_g - args.trust_region_threshold) / k_dot_k).clamp(min=0).detach()
-        else:
-            trust_factor = torch.zeros(1).to(device)
+        trust_factor = ((k_dot_g - args.trust_region_threshold) / k_dot_k).clamp(min=0)
+        g = g - trust_factor * k
         # z* = g - max(0, (k^T∙g - δ) / ||k||^2_2)∙k
-        trust_loss = trust_factor * kl
+        grads_f = -g
+        torch.autograd.backward(pi, grad_tensors=(grads_f,), retain_graph=True)
+        value_loss.backward()
+    else:
+        loss = policy_loss + value_loss
+        loss.mean().backward()
 
-    entropy_reg = args.entropy_weight * -(torch.log(pi) * pi).sum(1)
-    policy_loss = loss1 + loss2.sum(1) + trust_loss - entropy_reg
-    value_loss = F.smooth_l1_loss(q_a, q_ret)
-    loss = policy_loss + value_loss
-
-    optimizer.zero_grad()
-    loss.mean().backward()
     nn.utils.clip_grad_norm_(model.parameters(), args.max_gradient_norm)
     optimizer.step()
 
@@ -290,23 +310,23 @@ def train(model, average_model, t, optimizer, memory, on_policy=False, device=to
                                     * (0.5**((t-t_bounce)/2000)), args.lr_min)
             lr = param_group['lr']
 
-    for model_param, average_param in zip(model.parameters(), average_model.parameters()):
-        average_param.data = args.trust_region_decay * average_param.data + (1 - args.trust_region_decay) * model_param.data
+    if args.trust_region:
+        for model_param, average_param in zip(model.parameters(), average_model.parameters()):
+            average_param.data = args.trust_region_decay * average_param.data + (1 - args.trust_region_decay) * model_param.data
 
     writer.add_scalar("loss/policy_loss", policy_loss.mean().detach(), t)
     writer.add_scalar("loss/value_loss", value_loss.mean().detach(), t)
-    writer.add_scalar("loss/total_loss", loss.mean().detach(), t)
     writer.add_scalar("loss/entropy_reg", entropy_reg.mean().detach(), t)
     writer.add_scalar("loss/learning_rate", lr, t)
 
 
 def actor(rank, args, T,memory_queue,model_queue,p2):
     torch.manual_seed(args.seed + rank)
-    env = gym.make(args.env, java_env_path=".", port=args.port + rank * 2)
+    env = FrameStack(gym.make(args.env), 4)
+    # env = gym.make(args.env, java_env_path=".", port=args.port + rank * 2, p2=p2)
+    # print("Process {} fighting with {}".format(rank, p2))
     env.seed(args.seed + rank)
-    print("Process {} fighting with {}".format(rank,p2))
-    model = ActorCritic(env.observation_space, env.action_space,args.hidden_size)
-
+    model = ActorCritic(env.observation_space.shape[0], env.action_space,args.hidden_size)
     n_epi = 0
 
     # Actor Loop
@@ -314,7 +334,8 @@ def actor(rank, args, T,memory_queue,model_queue,p2):
         t_value = T.value()
         try:
             with timeout(seconds=30):
-                s = env.reset(p2=p2)
+                s = env.reset()
+                # opp_s = flip_obs(s)
         except TimeoutError:
             print("Time out to reset env")
             env.close()
@@ -339,6 +360,8 @@ def actor(rank, args, T,memory_queue,model_queue,p2):
             sum_entropy += Categorical(probs=prob.detach()).entropy()
             a = Categorical(prob.detach()).sample().item()
             s_prime, r, done, info = env.step(a)
+            # (opp_s_prime, opp_r, opp_done, _) = info.get('opp_transit', False)
+            # opp_a = obs_get_action(opp_s_prime)
             if info.get('no_data_receive', False):
                 env.close()
                 discard = True
@@ -397,13 +420,17 @@ if __name__ == '__main__':
     # writer = SummaryWriter(log_dir=save_dir, comment="-" + args.env + "-" + args.p2)
     memory = ReplayBuffer()
     writer = SummaryWriter(log_dir=tensorboard_dir)
-    env = gym.make(args.env, java_env_path=".", port=args.port)
-    model = ActorCritic(env.observation_space, env.action_space, args.hidden_size)
+    env = FrameStack(gym.make(args.env),4)
+    # env = gym.make(args.env, java_env_path=".", port=args.port, p2=args.p2)
+    model = ActorCritic(env.observation_space.shape[0], env.action_space, args.hidden_size)
     shared_model = copy.deepcopy(model)
-    average_model = copy.deepcopy(model)
     model.to(device)
-    average_model.to(device)
-    optimizer = optim.Adam(model.parameters(), lr=args.lr)
+    if args.trust_region:
+        average_model = copy.deepcopy(model)
+        average_model.to(device)
+    else:
+        average_model =  None
+    optimizer = optim.RMSprop(model.parameters(), lr=args.lr)
     scores = []
     m_scores = []
     env.close()
@@ -432,11 +459,11 @@ if __name__ == '__main__':
     if not args.evaluate:
         # Start training agents
         for rank in range(1, args.num_processes + 1):
-            p2 = p2_list[(rank-1) % len(p2_list)]
+            # p2 = p2_list[(rank-1) % len(p2_list)]
             model_queue.put(shared_model.state_dict())
-            p = mp.Process(target=actor, args=(rank, args, T, memory_queue, model_queue,p2))
+            p = mp.Process(target=actor, args=(rank, args, T, memory_queue, model_queue, args.p2))
             p.start()
-            sleep(15)
+            # sleep(15)
             print('Process ' + str(rank) + ' started')
             processes.append(p)
 
@@ -470,8 +497,8 @@ if __name__ == '__main__':
         print("EPISODE: {}, BEST: {}, MEAN_SCORE: {}".format(t, best, m_score))
         train(model, average_model, t, optimizer, memory, on_policy=True, device=device)
         if memory.size() >= args.replay_start:
-            for _ in range(_poisson(args.replay_ratio)):
-                train(model, average_model, t, optimizer, memory, device=device)
+            # for _ in range(_poisson(args.replay_ratio)):
+            train(model, average_model, t, optimizer, memory, device=device)
 
         # save the best model
         if best > pre_best:

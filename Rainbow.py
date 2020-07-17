@@ -1,679 +1,548 @@
-#!/usr/bin/env python3
+import math, random
+
 import gym
 import gym_fightingice
-import os
-import ptan
-import argparse
-import random
-
-import torch
-import torch.optim as optim
-import math
 import numpy as np
-from torch import nn as nn
-from torch.nn import functional as F
+import operator
+import signal, functools
+import torch
+import torch.nn as nn
+import torch.optim as optim
+import torch.autograd as autograd
+import torch.nn.functional as F
+from OpenAI.atari_wrappers import FrameStack
 
-import warnings
-from datetime import timedelta, datetime
-from types import SimpleNamespace
-from typing import Iterable, Tuple, List
+class NoisyLinear(nn.Module):
+    def __init__(self, in_features, out_features, use_cuda, std_init=0.4):
+        super(NoisyLinear, self).__init__()
 
-import ptan.ignite as ptan_ignite
-from ignite.engine import Engine
-from ignite.metrics import RunningAverage
-from ignite.contrib.handlers import tensorboard_logger as tb_logger
+        self.use_cuda = use_cuda
+        self.in_features = in_features
+        self.out_features = out_features
+        self.std_init = std_init
 
-NAME = "08_rainbow"
-N_STEPS = 4
-PRIO_REPLAY_ALPHA = 0.6
-save_dir = './OpenAI/Rainbow'
-env_name = "FightingiceDataNoFrameskip-v0"
-port = 4000
-p2 = "RHEA_PI"
+        self.weight_mu = nn.Parameter(torch.FloatTensor(out_features, in_features))
+        self.weight_sigma = nn.Parameter(torch.FloatTensor(out_features, in_features))
+        self.register_buffer('weight_epsilon', torch.FloatTensor(out_features, in_features))
 
-# replay buffer params
-BETA_START = 0.4
-BETA_FRAMES = 100000
+        self.bias_mu = nn.Parameter(torch.FloatTensor(out_features))
+        self.bias_sigma = nn.Parameter(torch.FloatTensor(out_features))
+        self.register_buffer('bias_epsilon', torch.FloatTensor(out_features))
 
-# distributional DQN params
-Vmax = 10
-Vmin = -10
-N_ATOMS = 51
-DELTA_Z = (Vmax - Vmin) / (N_ATOMS - 1)
-SEED = 123
-
-HYPERPARAMS = {
-    'pong': SimpleNamespace(**{
-        'env_name': "PongNoFrameskip-v4",
-        'stop_reward': 18.0,
-        'run_name': 'pong',
-        'replay_size': 100000,
-        'replay_initial': 10000,
-        'target_net_sync': 1000,
-        'epsilon_frames': 10 ** 5,
-        'epsilon_start': 1.0,
-        'epsilon_final': 0.02,
-        'learning_rate': 0.0001,
-        'gamma': 0.99,
-        'batch_size': 32
-    }),
-    'FTG': SimpleNamespace(**{
-        'env_name': "FightingiceDataNoFrameskip-v0",
-        'stop_reward': 2,
-        'run_name': 'Rainbow',
-        'replay_size': 1000000,
-        'replay_initial': 100000,
-        'target_net_sync': 1000,
-        'epsilon_frames': 10 ** 5,
-        'epsilon_start': 1.0,
-        'epsilon_final': 0.02,
-        'learning_rate': 0.0001,
-        'gamma': 0.99,
-        'batch_size': 32
-    }),
-    'breakout-small': SimpleNamespace(**{
-        'env_name': "BreakoutNoFrameskip-v4",
-        'stop_reward': 500.0,
-        'run_name': 'breakout-small',
-        'replay_size': 3 * 10 ** 5,
-        'replay_initial': 20000,
-        'target_net_sync': 1000,
-        'epsilon_frames': 10 ** 6,
-        'epsilon_start': 1.0,
-        'epsilon_final': 0.1,
-        'learning_rate': 0.0001,
-        'gamma': 0.99,
-        'batch_size': 64
-    }),
-    'breakout': SimpleNamespace(**{
-        'env_name': "BreakoutNoFrameskip-v4",
-        'stop_reward': 500.0,
-        'run_name': 'breakout',
-        'replay_size': 10 ** 6,
-        'replay_initial': 50000,
-        'target_net_sync': 10000,
-        'epsilon_frames': 10 ** 6,
-        'epsilon_start': 1.0,
-        'epsilon_final': 0.1,
-        'learning_rate': 0.00025,
-        'gamma': 0.99,
-        'batch_size': 32
-    }),
-    'invaders': SimpleNamespace(**{
-        'env_name': "SpaceInvadersNoFrameskip-v4",
-        'stop_reward': 500.0,
-        'run_name': 'breakout',
-        'replay_size': 10 ** 6,
-        'replay_initial': 50000,
-        'target_net_sync': 10000,
-        'epsilon_frames': 10 ** 6,
-        'epsilon_start': 1.0,
-        'epsilon_final': 0.1,
-        'learning_rate': 0.00025,
-        'gamma': 0.99,
-        'batch_size': 32
-    }),
-}
-
-
-def unpack_batch(batch: List[ptan.experience.ExperienceFirstLast]):
-    states, actions, rewards, dones, last_states = [], [], [], [], []
-    for exp in batch:
-        state = np.array(exp.state)
-        states.append(state)
-        actions.append(exp.action)
-        rewards.append(exp.reward)
-        dones.append(exp.last_state is None)
-        if exp.last_state is None:
-            lstate = state  # the result will be masked anyway
-        else:
-            lstate = np.array(exp.last_state)
-        last_states.append(lstate)
-    return np.array(states, copy=False), np.array(actions), \
-           np.array(rewards, dtype=np.float32), \
-           np.array(dones, dtype=np.uint8), \
-           np.array(last_states, copy=False)
-
-
-def calc_loss_dqn(batch, net, tgt_net, gamma, device="cpu"):
-    states, actions, rewards, dones, next_states = \
-        unpack_batch(batch)
-
-    states_v = torch.tensor(states).to(device)
-    next_states_v = torch.tensor(next_states).to(device)
-    actions_v = torch.tensor(actions).to(device)
-    rewards_v = torch.tensor(rewards).to(device)
-    done_mask = torch.BoolTensor(dones).to(device)
-
-    actions_v = actions_v.unsqueeze(-1)
-    state_action_vals = net(states_v).gather(1, actions_v)
-    state_action_vals = state_action_vals.squeeze(-1)
-    with torch.no_grad():
-        next_state_vals = tgt_net(next_states_v).max(1)[0]
-        next_state_vals[done_mask] = 0.0
-
-    bellman_vals = next_state_vals.detach() * gamma + rewards_v
-    return nn.MSELoss()(state_action_vals, bellman_vals)
-
-
-class EpsilonTracker:
-    def __init__(self, selector: ptan.actions.EpsilonGreedyActionSelector,
-                 params: SimpleNamespace):
-        self.selector = selector
-        self.params = params
-        self.frame(0)
-
-    def frame(self, frame_idx: int):
-        eps = self.params.epsilon_start - \
-              frame_idx / self.params.epsilon_frames
-        self.selector.epsilon = max(self.params.epsilon_final, eps)
-
-
-def batch_generator(buffer: ptan.experience.ExperienceReplayBuffer,
-                    initial: int, batch_size: int):
-    buffer.populate(initial)
-    while True:
-        buffer.populate(1)
-        yield buffer.sample(batch_size)
-
-
-@torch.no_grad()
-def calc_values_of_states(states, net, device="cpu"):
-    mean_vals = []
-    for batch in np.array_split(states, 64):
-        states_v = torch.tensor(batch).to(device)
-        action_values_v = net(states_v)
-        best_action_values_v = action_values_v.max(1)[0]
-        mean_vals.append(best_action_values_v.mean().item())
-    return np.mean(mean_vals)
-
-
-def setup_ignite(engine: Engine, params: SimpleNamespace,
-                 exp_source, run_name: str,
-                 extra_metrics: Iterable[str] = ()):
-    # get rid of missing metrics warning
-    warnings.simplefilter("ignore", category=UserWarning)
-
-    handler = ptan_ignite.EndOfEpisodeHandler(
-        exp_source, bound_avg_reward=params.stop_reward)
-    handler.attach(engine)
-    ptan_ignite.EpisodeFPSHandler().attach(engine)
-
-    @engine.on(ptan_ignite.EpisodeEvents.EPISODE_COMPLETED)
-    def episode_completed(trainer: Engine):
-        passed = trainer.state.metrics.get('time_passed', 0)
-        print("Episode %d: reward=%.0f, steps=%s, "
-              "speed=%.1f f/s, elapsed=%s" % (
-                  trainer.state.episode, trainer.state.episode_reward,
-                  trainer.state.episode_steps,
-                  trainer.state.metrics.get('avg_fps', 0),
-                  timedelta(seconds=int(passed))))
-
-    @engine.on(ptan_ignite.EpisodeEvents.BOUND_REWARD_REACHED)
-    def game_solved(trainer: Engine):
-        passed = trainer.state.metrics['time_passed']
-        print("Game solved in %s, after %d episodes "
-              "and %d iterations!" % (
-                  timedelta(seconds=int(passed)),
-                  trainer.state.episode, trainer.state.iteration))
-        trainer.should_terminate = True
-
-    now = datetime.now().isoformat(timespec='minutes')
-    logdir = os.path.join(save_dir, "checkpoint", "runs", "{}".format(now))
-    tb = tb_logger.TensorboardLogger(log_dir=logdir)
-    run_avg = RunningAverage(output_transform=lambda v: v['loss'])
-    run_avg.attach(engine, "avg_loss")
-
-    metrics = ['reward', 'steps', 'avg_reward']
-    handler = tb_logger.OutputHandler(
-        tag="episodes", metric_names=metrics)
-    event = ptan_ignite.EpisodeEvents.EPISODE_COMPLETED
-    tb.attach(engine, log_handler=handler, event_name=event)
-
-    # write to tensorboard every 100 iterations
-    ptan_ignite.PeriodicEvents().attach(engine)
-    metrics = ['avg_loss', 'avg_fps']
-    metrics.extend(extra_metrics)
-    handler = tb_logger.OutputHandler(
-        tag="train", metric_names=metrics,
-        output_transform=lambda a: a)
-    event = ptan_ignite.PeriodEvents.ITERS_100_COMPLETED
-    tb.attach(engine, log_handler=handler, event_name=event)
-
-
-class NoisyLinear(nn.Linear):
-    def __init__(self, in_features, out_features,
-                 sigma_init=0.017, bias=True):
-        super(NoisyLinear, self).__init__(
-            in_features, out_features, bias=bias)
-        w = torch.full((out_features, in_features), sigma_init)
-        self.sigma_weight = nn.Parameter(w)
-        z = torch.zeros(out_features, in_features)
-        self.register_buffer("epsilon_weight", z)
-        if bias:
-            w = torch.full((out_features,), sigma_init)
-            self.sigma_bias = nn.Parameter(w)
-            z = torch.zeros(out_features)
-            self.register_buffer("epsilon_bias", z)
         self.reset_parameters()
+        self.reset_noise()
+
+    def forward(self, x):
+        if self.use_cuda:
+            weight_epsilon = self.weight_epsilon.cuda()
+            bias_epsilon = self.bias_epsilon.cuda()
+        else:
+            weight_epsilon = self.weight_epsilon
+            bias_epsilon = self.bias_epsilon
+
+        if self.training:
+            weight = self.weight_mu + self.weight_sigma.mul(weight_epsilon)
+            bias = self.bias_mu + self.bias_sigma.mul(bias_epsilon)
+        else:
+            weight = self.weight_mu
+            bias = self.bias_mu
+
+        return F.linear(x, weight, bias)
 
     def reset_parameters(self):
-        std = math.sqrt(3 / self.in_features)
-        self.weight.data.uniform_(-std, std)
-        self.bias.data.uniform_(-std, std)
+        mu_range = 1 / math.sqrt(self.weight_mu.size(1))
 
-    def forward(self, input):
-        self.epsilon_weight.normal_()
-        bias = self.bias
-        if bias is not None:
-            self.epsilon_bias.normal_()
-            bias = bias + self.sigma_bias * \
-                   self.epsilon_bias.data
-        v = self.sigma_weight * self.epsilon_weight.data + \
-            self.weight
-        return F.linear(input, v, bias)
+        self.weight_mu.data.uniform_(-mu_range, mu_range)
+        self.weight_sigma.data.fill_(self.std_init / math.sqrt(self.weight_sigma.size(1)))
 
+        self.bias_mu.data.uniform_(-mu_range, mu_range)
+        self.bias_sigma.data.fill_(self.std_init / math.sqrt(self.bias_sigma.size(0)))
 
-class NoisyFactorizedLinear(nn.Linear):
-    """
-    NoisyNet layer with factorized gaussian noise
+    def reset_noise(self):
+        epsilon_in = self._scale_noise(self.in_features)
+        epsilon_out = self._scale_noise(self.out_features)
 
-    N.B. nn.Linear already initializes weight and bias to
-    """
+        self.weight_epsilon.copy_(epsilon_out.ger(epsilon_in))
+        self.bias_epsilon.copy_(self._scale_noise(self.out_features))
 
-    def __init__(self, in_features, out_features,
-                 sigma_zero=0.4, bias=True):
-        super(NoisyFactorizedLinear, self).__init__(
-            in_features, out_features, bias=bias)
-        sigma_init = sigma_zero / math.sqrt(in_features)
-        w = torch.full((out_features, in_features), sigma_init)
-        self.sigma_weight = nn.Parameter(w)
-        z1 = torch.zeros(1, in_features)
-        self.register_buffer("epsilon_input", z1)
-        z2 = torch.zeros(out_features, 1)
-        self.register_buffer("epsilon_output", z2)
-        if bias:
-            w = torch.full((out_features,), sigma_init)
-            self.sigma_bias = nn.Parameter(w)
-
-    def forward(self, input):
-        self.epsilon_input.normal_()
-        self.epsilon_output.normal_()
-
-        func = lambda x: torch.sign(x) * \
-                         torch.sqrt(torch.abs(x))
-        eps_in = func(self.epsilon_input.data)
-        eps_out = func(self.epsilon_output.data)
-
-        bias = self.bias
-        if bias is not None:
-            bias = bias + self.sigma_bias * eps_out.t()
-        noise_v = torch.mul(eps_in, eps_out)
-        v = self.weight + self.sigma_weight * noise_v
-        return F.linear(input, v, bias)
+    def _scale_noise(self, size):
+        x = torch.randn(size)
+        x = x.sign().mul(x.abs().sqrt())
+        return x
 
 
-class NoisyDQN(nn.Module):
-    def __init__(self, input_shape, n_actions):
-        super(NoisyDQN, self).__init__()
+class SegmentTree(object):
+    def __init__(self, capacity, operation, neutral_element):
+        """Build a Segment Tree data structure.
+        https://en.wikipedia.org/wiki/Segment_tree
+        Can be used as regular array, but with two
+        important differences:
+            a) setting item's value is slightly slower.
+               It is O(lg capacity) instead of O(1).
+            b) user has access to an efficient `reduce`
+               operation which reduces `operation` over
+               a contiguous subsequence of items in the
+               array.
+        Paramters
+        ---------
+        capacity: int
+            Total size of the array - must be a power of two.
+        operation: lambda obj, obj -> obj
+            and operation for combining elements (eg. sum, max)
+            must for a mathematical group together with the set of
+            possible values for array elements.
+        neutral_element: obj
+            neutral element for the operation above. eg. float('-inf')
+            for max and 0 for sum.
+        """
+        assert capacity > 0 and capacity & (capacity - 1) == 0, "capacity must be positive and a power of 2."
+        self._capacity = capacity
+        self._value = [neutral_element for _ in range(2 * capacity)]
+        self._operation = operation
 
-        self.conv = nn.Sequential(
-            nn.Conv2d(input_shape[0], 32, kernel_size=8, stride=4),
-            nn.ReLU(),
-            nn.Conv2d(32, 64, kernel_size=4, stride=2),
-            nn.ReLU(),
-            nn.Conv2d(64, 64, kernel_size=3, stride=1),
-            nn.ReLU()
+    def _reduce_helper(self, start, end, node, node_start, node_end):
+        if start == node_start and end == node_end:
+            return self._value[node]
+        mid = (node_start + node_end) // 2
+        if end <= mid:
+            return self._reduce_helper(start, end, 2 * node, node_start, mid)
+        else:
+            if mid + 1 <= start:
+                return self._reduce_helper(start, end, 2 * node + 1, mid + 1, node_end)
+            else:
+                return self._operation(
+                    self._reduce_helper(start, mid, 2 * node, node_start, mid),
+                    self._reduce_helper(mid + 1, end, 2 * node + 1, mid + 1, node_end)
+                )
+
+    def reduce(self, start=0, end=None):
+        """Returns result of applying `self.operation`
+        to a contiguous subsequence of the array.
+            self.operation(arr[start], operation(arr[start+1], operation(... arr[end])))
+        Parameters
+        ----------
+        start: int
+            beginning of the subsequence
+        end: int
+            end of the subsequences
+        Returns
+        -------
+        reduced: obj
+            result of reducing self.operation over the specified range of array elements.
+        """
+        if end is None:
+            end = self._capacity
+        if end < 0:
+            end += self._capacity
+        end -= 1
+        return self._reduce_helper(start, end, 1, 0, self._capacity - 1)
+
+    def __setitem__(self, idx, val):
+        # index of the leaf
+        idx += self._capacity
+        self._value[idx] = val
+        idx //= 2
+        while idx >= 1:
+            self._value[idx] = self._operation(
+                self._value[2 * idx],
+                self._value[2 * idx + 1]
+            )
+            idx //= 2
+
+    def __getitem__(self, idx):
+        assert 0 <= idx < self._capacity
+        return self._value[self._capacity + idx]
+
+
+class SumSegmentTree(SegmentTree):
+    def __init__(self, capacity):
+        super(SumSegmentTree, self).__init__(
+            capacity=capacity,
+            operation=operator.add,
+            neutral_element=0.0
         )
 
-        conv_out_size = self._get_conv_out(input_shape)
-        self.noisy_layers = [
-            NoisyLinear(conv_out_size, 512),
-            NoisyLinear(512, n_actions)
-        ]
-        self.fc = nn.Sequential(
-            self.noisy_layers[0],
-            nn.ReLU(),
-            self.noisy_layers[1]
+    def sum(self, start=0, end=None):
+        """Returns arr[start] + ... + arr[end]"""
+        return super(SumSegmentTree, self).reduce(start, end)
+
+    def find_prefixsum_idx(self, prefixsum):
+        """Find the highest index `i` in the array such that
+            sum(arr[0] + arr[1] + ... + arr[i - i]) <= prefixsum
+        if array values are probabilities, this function
+        allows to sample indexes according to the discrete
+        probability efficiently.
+        Parameters
+        ----------
+        perfixsum: float
+            upperbound on the sum of array prefix
+        Returns
+        -------
+        idx: int
+            highest index satisfying the prefixsum constraint
+        """
+        assert 0 <= prefixsum <= self.sum() + 1e-5
+        idx = 1
+        while idx < self._capacity:  # while non-leaf
+            if self._value[2 * idx] > prefixsum:
+                idx = 2 * idx
+            else:
+                prefixsum -= self._value[2 * idx]
+                idx = 2 * idx + 1
+        return idx - self._capacity
+
+
+class MinSegmentTree(SegmentTree):
+    def __init__(self, capacity):
+        super(MinSegmentTree, self).__init__(
+            capacity=capacity,
+            operation=min,
+            neutral_element=float('inf')
         )
 
-    def _get_conv_out(self, shape):
-        o = self.conv(torch.zeros(1, *shape))
-        return int(np.prod(o.size()))
+    def min(self, start=0, end=None):
+        """Returns min(arr[start], ...,  arr[end])"""
 
-    def forward(self, x):
-        fx = x.float() / 256
-        conv_out = self.conv(fx).view(fx.size()[0], -1)
-        return self.fc(conv_out)
-
-    def noisy_layers_sigma_snr(self):
-        return [
-            ((layer.weight ** 2).mean().sqrt() / (layer.sigma_weight ** 2).mean().sqrt()).item()
-            for layer in self.noisy_layers
-        ]
+        return super(MinSegmentTree, self).reduce(start, end)
 
 
-class PrioReplayBuffer:
-    def __init__(self, exp_source, buf_size, prob_alpha=0.6):
-        self.exp_source_iter = iter(exp_source)
-        self.prob_alpha = prob_alpha
-        self.capacity = buf_size
-        self.pos = 0
-        self.buffer = []
-        self.priorities = np.zeros(
-            (buf_size,), dtype=np.float32)
-        self.beta = BETA_START
-
-    def update_beta(self, idx):
-        v = BETA_START + idx * (1.0 - BETA_START) / \
-            BETA_FRAMES
-        self.beta = min(1.0, v)
-        return self.beta
+class ReplayBuffer(object):
+    def __init__(self, size):
+        """Create Replay buffer.
+        Parameters
+        ----------
+        size: int
+            Max number of transitions to store in the buffer. When the buffer
+            overflows the old memories are dropped.
+        """
+        self._storage = []
+        self._maxsize = size
+        self._next_idx = 0
 
     def __len__(self):
-        return len(self.buffer)
+        return len(self._storage)
 
-    def populate(self, count):
-        max_prio = self.priorities.max() if \
-            self.buffer else 1.0
-        for _ in range(count):
-            sample = next(self.exp_source_iter)
-            if len(self.buffer) < self.capacity:
-                self.buffer.append(sample)
-            else:
-                self.buffer[self.pos] = sample
-            self.priorities[self.pos] = max_prio
-            self.pos = (self.pos + 1) % self.capacity
+    def push(self, state, action, reward, next_state, done):
+        data = (state, action, reward, next_state, done)
+
+        if self._next_idx >= len(self._storage):
+            self._storage.append(data)
+        else:
+            self._storage[self._next_idx] = data
+        self._next_idx = (self._next_idx + 1) % self._maxsize
+
+    def _encode_sample(self, idxes):
+        obses_t, actions, rewards, obses_tp1, dones = [], [], [], [], []
+        for i in idxes:
+            data = self._storage[i]
+            obs_t, action, reward, obs_tp1, done = data
+            obses_t.append(np.array(obs_t, copy=False))
+            actions.append(np.array(action, copy=False))
+            rewards.append(reward)
+            obses_tp1.append(np.array(obs_tp1, copy=False))
+            dones.append(done)
+        return np.array(obses_t), np.array(actions), np.array(rewards), np.array(obses_tp1), np.array(dones)
 
     def sample(self, batch_size):
-        if len(self.buffer) == self.capacity:
-            prios = self.priorities
-        else:
-            prios = self.priorities[:self.pos]
-        probs = prios ** self.prob_alpha
-
-        probs /= probs.sum()
-        indices = np.random.choice(len(self.buffer),
-                                   batch_size, p=probs)
-        samples = [self.buffer[idx] for idx in indices]
-        total = len(self.buffer)
-        weights = (total * probs[indices]) ** (-self.beta)
-        weights /= weights.max()
-        return samples, indices, \
-               np.array(weights, dtype=np.float32)
-
-    def update_priorities(self, batch_indices,
-                          batch_priorities):
-        for idx, prio in zip(batch_indices,
-                             batch_priorities):
-            self.priorities[idx] = prio
-
-
-class DuelingDQN(nn.Module):
-    def __init__(self, input_shape, n_actions):
-        super(DuelingDQN, self).__init__()
-
-        self.conv = nn.Sequential(
-            nn.Conv2d(input_shape[0], 32,
-                      kernel_size=8, stride=4),
-            nn.ReLU(),
-            nn.Conv2d(32, 64, kernel_size=4, stride=2),
-            nn.ReLU(),
-            nn.Conv2d(64, 64, kernel_size=3, stride=1),
-            nn.ReLU()
-        )
-
-        conv_out_size = self._get_conv_out(input_shape)
-        self.fc_adv = nn.Sequential(
-            nn.Linear(conv_out_size, 256),
-            nn.ReLU(),
-            nn.Linear(256, n_actions)
-        )
-        self.fc_val = nn.Sequential(
-            nn.Linear(conv_out_size, 256),
-            nn.ReLU(),
-            nn.Linear(256, 1)
-        )
-
-    def _get_conv_out(self, shape):
-        o = self.conv(torch.zeros(1, *shape))
-        return int(np.prod(o.size()))
-
-    def forward(self, x):
-        adv, val = self.adv_val(x)
-        return val + (adv - adv.mean(dim=1, keepdim=True))
-
-    def adv_val(self, x):
-        fx = x.float() / 256
-        conv_out = self.conv(fx).view(fx.size()[0], -1)
-        return self.fc_adv(conv_out), self.fc_val(conv_out)
+        """Sample a batch of experiences.
+        Parameters
+        ----------
+        batch_size: int
+            How many transitions to sample.
+        Returns
+        -------
+        obs_batch: np.array
+            batch of observations
+        act_batch: np.array
+            batch of actions executed given obs_batch
+        rew_batch: np.array
+            rewards received as results of executing act_batch
+        next_obs_batch: np.array
+            next set of observations seen after executing act_batch
+        done_mask: np.array
+            done_mask[i] = 1 if executing act_batch[i] resulted in
+            the end of an episode and 0 otherwise.
+        """
+        idxes = [random.randint(0, len(self._storage) - 1) for _ in range(batch_size)]
+        return self._encode_sample(idxes)
 
 
-class DistributionalDQN(nn.Module):
-    def __init__(self, input_shape, n_actions):
-        super(DistributionalDQN, self).__init__()
+class PrioritizedReplayBuffer(ReplayBuffer):
+    def __init__(self, size, alpha):
+        """Create Prioritized Replay buffer.
+        Parameters
+        ----------
+        size: int
+            Max number of transitions to store in the buffer. When the buffer
+            overflows the old memories are dropped.
+        alpha: float
+            how much prioritization is used
+            (0 - no prioritization, 1 - full prioritization)
+        See Also
+        --------
+        ReplayBuffer.__init__
+        """
+        super(PrioritizedReplayBuffer, self).__init__(size)
+        assert alpha > 0
+        self._alpha = alpha
 
-        self.conv = nn.Sequential(
-            nn.Conv2d(input_shape[0], 32, kernel_size=8, stride=4),
-            nn.ReLU(),
-            nn.Conv2d(32, 64, kernel_size=4, stride=2),
-            nn.ReLU(),
-            nn.Conv2d(64, 64, kernel_size=3, stride=1),
-            nn.ReLU()
-        )
+        it_capacity = 1
+        while it_capacity < size:
+            it_capacity *= 2
 
-        conv_out_size = self._get_conv_out(input_shape)
-        self.fc = nn.Sequential(
-            nn.Linear(conv_out_size, 512),
-            nn.ReLU(),
-            nn.Linear(512, n_actions * N_ATOMS)
-        )
+        self._it_sum = SumSegmentTree(it_capacity)
+        self._it_min = MinSegmentTree(it_capacity)
+        self._max_priority = 1.0
 
-        sups = torch.arange(Vmin, Vmax + DELTA_Z, DELTA_Z)
-        self.register_buffer("supports", sups)
-        self.softmax = nn.Softmax(dim=1)
+    def push(self, *args, **kwargs):
+        """See ReplayBuffer.store_effect"""
+        idx = self._next_idx
+        super(PrioritizedReplayBuffer, self).push(*args, **kwargs)
+        self._it_sum[idx] = self._max_priority ** self._alpha
+        self._it_min[idx] = self._max_priority ** self._alpha
 
-    def _get_conv_out(self, shape):
-        o = self.conv(torch.zeros(1, *shape))
-        return int(np.prod(o.size()))
+    def _sample_proportional(self, batch_size):
+        res = []
+        for _ in range(batch_size):
+            # TODO(szymon): should we ensure no repeats?
+            mass = random.random() * self._it_sum.sum(0, len(self._storage) - 1)
+            idx = self._it_sum.find_prefixsum_idx(mass)
+            res.append(idx)
+        return res
 
-    def forward(self, x):
-        batch_size = x.size()[0]
-        fx = x.float() / 256
-        conv_out = self.conv(fx).view(batch_size, -1)
-        fc_out = self.fc(conv_out)
-        return fc_out.view(batch_size, -1, N_ATOMS)
+    def sample(self, batch_size, beta):
+        """Sample a batch of experiences.
+        compared to ReplayBuffer.sample
+        it also returns importance weights and idxes
+        of sampled experiences.
+        Parameters
+        ----------
+        batch_size: int
+            How many transitions to sample.
+        beta: float
+            To what degree to use importance weights
+            (0 - no corrections, 1 - full correction)
+        Returns
+        -------
+        obs_batch: np.array
+            batch of observations
+        act_batch: np.array
+            batch of actions executed given obs_batch
+        rew_batch: np.array
+            rewards received as results of executing act_batch
+        next_obs_batch: np.array
+            next set of observations seen after executing act_batch
+        done_mask: np.array
+            done_mask[i] = 1 if executing act_batch[i] resulted in
+            the end of an episode and 0 otherwise.
+        weights: np.array
+            Array of shape (batch_size,) and dtype np.float32
+            denoting importance weight of each sampled transition
+        idxes: np.array
+            Array of shape (batch_size,) and dtype np.int32
+            idexes in buffer of sampled experiences
+        """
+        assert beta > 0
 
-    def both(self, x):
-        cat_out = self(x)
-        probs = self.apply_softmax(cat_out)
-        weights = probs * self.supports
-        res = weights.sum(dim=2)
-        return cat_out, res
+        idxes = self._sample_proportional(batch_size)
 
-    def qvals(self, x):
-        return self.both(x)[1]
+        weights = []
+        p_min = self._it_min.min() / self._it_sum.sum()
+        max_weight = (p_min * len(self._storage)) ** (-beta)
 
-    def apply_softmax(self, t):
-        return self.softmax(t.view(-1, N_ATOMS)).view(t.size())
+        for idx in idxes:
+            p_sample = self._it_sum[idx] / self._it_sum.sum()
+            weight = (p_sample * len(self._storage)) ** (-beta)
+            weights.append(weight / max_weight)
+        weights = np.array(weights)
+        encoded_sample = self._encode_sample(idxes)
+        return tuple(list(encoded_sample) + [weights, idxes])
 
+    def update_priorities(self, idxes, priorities):
+        """Update priorities of sampled transitions.
+        sets priority of transition at index idxes[i] in buffer
+        to priorities[i].
+        Parameters
+        ----------
+        idxes: [int]
+            List of idxes of sampled transitions
+        priorities: [float]
+            List of updated priorities corresponding to
+            transitions at the sampled idxes denoted by
+            variable `idxes`.
+        """
+        assert len(idxes) == len(priorities)
+        for idx, priority in zip(idxes, priorities):
+            assert priority > 0
+            assert 0 <= idx < len(self._storage)
+            self._it_sum[idx] = priority ** self._alpha
+            self._it_min[idx] = priority ** self._alpha
 
-def distr_projection(next_distr, rewards, dones, gamma):
-    """
-    Perform distribution projection aka Catergorical Algorithm from the
-    "A Distributional Perspective on RL" paper
-    """
-    batch_size = len(rewards)
-    proj_distr = np.zeros((batch_size, N_ATOMS),
-                          dtype=np.float32)
-    delta_z = (Vmax - Vmin) / (N_ATOMS - 1)
-    for atom in range(N_ATOMS):
-        v = rewards + (Vmin + atom * delta_z) * gamma
-        tz_j = np.minimum(Vmax, np.maximum(Vmin, v))
-        b_j = (tz_j - Vmin) / delta_z
-        l = np.floor(b_j).astype(np.int64)
-        u = np.ceil(b_j).astype(np.int64)
-        eq_mask = u == l
-        proj_distr[eq_mask, l[eq_mask]] += \
-            next_distr[eq_mask, atom]
-        ne_mask = u != l
-        proj_distr[ne_mask, l[ne_mask]] += \
-            next_distr[ne_mask, atom] * (u - b_j)[ne_mask]
-        proj_distr[ne_mask, u[ne_mask]] += \
-            next_distr[ne_mask, atom] * (b_j - l)[ne_mask]
-    if dones.any():
-        proj_distr[dones] = 0.0
-        tz_j = np.minimum(
-            Vmax, np.maximum(Vmin, rewards[dones]))
-        b_j = (tz_j - Vmin) / delta_z
-        l = np.floor(b_j).astype(np.int64)
-        u = np.ceil(b_j).astype(np.int64)
-        eq_mask = u == l
-        eq_dones = dones.copy()
-        eq_dones[dones] = eq_mask
-        if eq_dones.any():
-            proj_distr[eq_dones, l[eq_mask]] = 1.0
-        ne_mask = u != l
-        ne_dones = dones.copy()
-        ne_dones[dones] = ne_mask
-        if ne_dones.any():
-            proj_distr[ne_dones, l[ne_mask]] = \
-                (u - b_j)[ne_mask]
-            proj_distr[ne_dones, u[ne_mask]] = \
-                (b_j - l)[ne_mask]
-    return proj_distr
+            self._max_priority = max(self._max_priority, priority)
 
 
 class RainbowDQN(nn.Module):
-    def __init__(self, input_shape, n_actions):
+    def __init__(self, num_inputs, num_actions, num_atoms, Vmin, Vmax, USE_CUDA):
         super(RainbowDQN, self).__init__()
 
-        self.conv = nn.Sequential(
-            nn.Conv2d(input_shape[0], 32, kernel_size=8, stride=4),
-            nn.ReLU(),
-            nn.Conv2d(32, 64, kernel_size=4, stride=2),
-            nn.ReLU(),
-            nn.Conv2d(64, 64, kernel_size=3, stride=1),
-            nn.ReLU()
-        )
+        self.num_inputs = num_inputs
+        self.num_actions = num_actions
+        self.num_atoms = num_atoms
+        self.Vmin = Vmin
+        self.Vmax = Vmax
 
-        conv_out_size = self._get_conv_out(input_shape)
-        self.fc_adv = nn.Sequential(
-            NoisyLinear(conv_out_size, 256),
-            nn.ReLU(),
-            NoisyLinear(256, n_actions)
-        )
-        self.fc_val = nn.Sequential(
-            nn.Linear(conv_out_size, 256),
-            nn.ReLU(),
-            nn.Linear(256, 1)
-        )
+        self.linear1 = nn.Linear(num_inputs, 32)
+        self.linear2 = nn.Linear(32, 64)
 
-    def _get_conv_out(self, shape):
-        o = self.conv(torch.zeros(1, *shape))
-        return int(np.prod(o.size()))
+        self.noisy_value1 = NoisyLinear(64, 64, use_cuda=USE_CUDA)
+        self.noisy_value2 = NoisyLinear(64, self.num_atoms, use_cuda=USE_CUDA)
+
+        self.noisy_advantage1 = NoisyLinear(64, 64, use_cuda=USE_CUDA)
+        self.noisy_advantage2 = NoisyLinear(64, self.num_atoms * self.num_actions, use_cuda=USE_CUDA)
 
     def forward(self, x):
-        adv, val = self.adv_val(x)
-        return val + (adv - adv.mean(dim=1, keepdim=True))
+        batch_size = x.size(0)
 
-    def adv_val(self, x):
-        fx = x.float() / 256
-        conv_out = self.conv(fx).view(fx.size()[0], -1)
-        return self.fc_adv(conv_out), self.fc_val(conv_out)
+        x = F.relu(self.linear1(x))
+        x = F.relu(self.linear2(x))
 
+        value = F.relu(self.noisy_value1(x))
+        value = self.noisy_value2(value)
 
-def calc_loss_rainbow(batch, batch_weights, net, tgt_net, gamma,
-                      device="cpu", double=True):
-    states, actions, rewards, dones, next_states = unpack_batch(batch)
+        advantage = F.relu(self.noisy_advantage1(x))
+        advantage = self.noisy_advantage2(advantage)
 
-    states_v = torch.tensor(states).to(device)
-    actions_v = torch.tensor(actions).to(device)
-    rewards_v = torch.tensor(rewards).to(device)
-    done_mask = torch.BoolTensor(dones).to(device)
-    batch_weights_v = torch.tensor(batch_weights).to(device)
+        value = value.view(batch_size, 1, self.num_atoms)
+        advantage = advantage.view(batch_size, self.num_actions, self.num_atoms)
 
-    actions_v = actions_v.unsqueeze(-1)
-    state_action_values = net(states_v).gather(1, actions_v)
-    state_action_values = state_action_values.squeeze(-1)
-    with torch.no_grad():
-        next_states_v = torch.tensor(next_states).to(device)
-        if double:
-            next_state_actions = net(next_states_v).max(1)[1]
-            next_state_actions = next_state_actions.unsqueeze(-1)
-            next_state_values = tgt_net(next_states_v).gather(
-                1, next_state_actions).squeeze(-1)
-        else:
-            next_state_values = tgt_net(next_states_v).max(1)[0]
-        next_state_values[done_mask] = 0.0
-        expected_state_action_values = \
-            next_state_values.detach() * gamma + rewards_v
-    losses_v = (state_action_values -
-                expected_state_action_values) ** 2
-    losses_v *= batch_weights_v
-    return losses_v.mean(), (losses_v + 1e-5).data.cpu().numpy()
+        x = value + advantage - advantage.mean(1, keepdim=True)
+        x = F.softmax(x.view(-1, self.num_atoms)).view(-1, self.num_actions, self.num_atoms)
+
+        return x
+
+    def reset_noise(self):
+        self.noisy_value1.reset_noise()
+        self.noisy_value2.reset_noise()
+        self.noisy_advantage1.reset_noise()
+        self.noisy_advantage2.reset_noise()
+
+    def act(self, state):
+        state = state.unsqueeze(0)
+        dist = self.forward(state)
+        dist = dist * torch.linspace(self.Vmin, self.Vmax, self.num_atoms)
+        action = dist.sum(2).max(1)[1].numpy()[0]
+        return action
 
 
-def calc_loss_prio(batch, batch_weights, net, tgt_net, gamma, device="cpu"):
-    states, actions, rewards, dones, next_states = unpack_batch(batch)
-
-    states_v = torch.tensor(states).to(device)
-    actions_v = torch.tensor(actions).to(device)
-    rewards_v = torch.tensor(rewards).to(device)
-    done_mask = torch.BoolTensor(dones).to(device)
-    batch_weights_v = torch.tensor(batch_weights).to(device)
-
-    state_action_values = net(states_v).gather(1, actions_v.unsqueeze(-1)).squeeze(-1)
-    with torch.no_grad():
-        next_states_v = torch.tensor(next_states).to(device)
-        next_state_values = tgt_net(next_states_v).max(1)[0]
-        next_state_values[done_mask] = 0.0
-        expected_state_action_values = next_state_values.detach() * gamma + rewards_v
-    losses_v = batch_weights_v * (state_action_values - expected_state_action_values) ** 2
-    return losses_v.mean(), (losses_v + 1e-5).data.cpu().numpy()
+def update_target(current_model, target_model):
+    target_model.load_state_dict(current_model.state_dict())
 
 
-def process_batch(engine, batch_data):
-    batch, batch_indices, batch_weights = batch_data
+def projection_distribution(next_state, rewards, dones):
+    batch_size = next_state.size(0)
+
+    delta_z = float(Vmax - Vmin) / (num_atoms - 1)
+    support = torch.linspace(Vmin, Vmax, num_atoms)
+
+    next_dist = target_model(next_state).data.cpu() * support
+    next_action = next_dist.sum(2).max(1)[1]
+    next_action = next_action.unsqueeze(1).unsqueeze(1).expand(next_dist.size(0), 1, next_dist.size(2))
+    next_dist = next_dist.gather(1, next_action).squeeze(1)
+
+    rewards = rewards.unsqueeze(1).expand_as(next_dist)
+    dones = dones.unsqueeze(1).expand_as(next_dist)
+    support = support.unsqueeze(0).expand_as(next_dist)
+
+    Tz = rewards + (1 - dones) * 0.99 * support
+    Tz = Tz.clamp(min=Vmin, max=Vmax)
+    b = (Tz - Vmin) / delta_z
+    l = b.floor().long()
+    u = b.ceil().long()
+
+    offset = torch.linspace(0, (batch_size - 1) * num_atoms, batch_size).long() \
+        .unsqueeze(1).expand(batch_size, num_atoms)
+
+    proj_dist = torch.zeros(next_dist.size())
+    proj_dist.view(-1).index_add_(0, (l + offset).view(-1), (next_dist * (u.float() - b)).view(-1))
+    proj_dist.view(-1).index_add_(0, (u + offset).view(-1), (next_dist * (b - l.float())).view(-1))
+
+    return proj_dist
+
+
+def compute_td_loss(batch_size):
+    state, action, reward, next_state, done = replay_buffer.sample(batch_size)
+
+    state = torch.FloatTensor(np.float32(state))
+    next_state = torch.FloatTensor(np.float32(next_state))
+    action = torch.LongTensor(action)
+    reward = torch.FloatTensor(reward)
+    done = torch.FloatTensor(np.float32(done))
+
+    proj_dist = projection_distribution(next_state, reward, done)
+
+    dist = current_model(state)
+    action = action.unsqueeze(1).unsqueeze(1).expand(batch_size, 1, num_atoms)
+    dist = dist.gather(1, action).squeeze(1)
+    dist.data.clamp_(0.01, 0.99)
+    loss = -(proj_dist * dist.log()).sum(1)
+    loss = loss.mean()
+
     optimizer.zero_grad()
-    loss_v, sample_prios = calc_loss_prio(
-        batch, batch_weights, net, tgt_net.target_model,
-        gamma=params.gamma ** N_STEPS, device=device)
-    loss_v.backward()
+    loss.backward()
     optimizer.step()
-    buffer.update_priorities(batch_indices, sample_prios)
-    if engine.state.iteration % params.target_net_sync == 0:
-        tgt_net.sync()
-    return {
-        "loss": loss_v.item(),
-        "beta": buffer.update_beta(engine.state.iteration),
-    }
+
+    current_model.reset_noise()
+    target_model.reset_noise()
+
+    return loss
 
 
-if __name__ == "__main__":
-    random.seed(SEED)
-    torch.manual_seed(SEED)
-    params = HYPERPARAMS['FTG']
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--cuda", default=True,
-                        action="store_true", help="Enable cuda")
-    args = parser.parse_args()
-    device = torch.device("cuda" if args.cuda else "cpu")
+num_atoms = 51
+Vmin = -10
+Vmax = 10
+num_frames = 1500000
+batch_size = 32
+gamma = 0.99
+env_id = "Pong-ram-v0"
 
-    env = gym.make(env_name, java_env_path=".", port=port)
-    env.seed(SEED)
-    net = RainbowDQN(env.observation_space.shape,
-                     env.action_space.n).to(device)
-    tgt_net = ptan.agent.TargetNet(net)
-    selector = ptan.actions.ArgmaxActionSelector()
-    agent = ptan.agent.DQNAgent(net, selector, device=device)
-    exp_source = ptan.experience.ExperienceSourceFirstLast(
-        env, agent, gamma=params.gamma, steps_count=N_STEPS,p2=p2)
-    buffer = PrioReplayBuffer(
-        exp_source, params.replay_size, PRIO_REPLAY_ALPHA)
-    optimizer = optim.Adam(net.parameters(),
-                           lr=params.learning_rate)
-    engine = Engine(process_batch)
-    setup_ignite(engine, params, exp_source, NAME)
-    engine.run(batch_generator(buffer, params.replay_initial,
-                               params.batch_size))
+USE_CUDA = torch.cuda.is_available()
+device = torch.device("cuda")
+env = FrameStack(gym.make(env_id),4)
+current_model = RainbowDQN(env.observation_space.shape[0], env.action_space.n, num_atoms, Vmin, Vmax, USE_CUDA)
+target_model = RainbowDQN(env.observation_space.shape[0], env.action_space.n, num_atoms, Vmin, Vmax, USE_CUDA)
+current_model.to(device)
+target_model.to(device)
+
+if USE_CUDA:
+    current_model = current_model.cuda()
+    target_model = target_model.cuda()
+
+optimizer = optim.Adam(current_model.parameters(), 0.001)
+replay_buffer = ReplayBuffer(10000)
+update_target(current_model, target_model)
+
+losses = []
+all_rewards = []
+episode_reward = 0
+
+state = env.reset()
+for frame_idx in range(1, num_frames + 1):
+    action = current_model.act(torch.FloatTensor(state).to(device))
+
+    next_state, reward, done, _ = env.step(action)
+    replay_buffer.push(state, action, reward, next_state, done)
+
+    state = next_state
+    episode_reward += reward
+
+    if done:
+        state = env.reset()
+        all_rewards.append(episode_reward)
+        episode_reward = 0
+
+    if len(replay_buffer) > batch_size:
+        loss = compute_td_loss(batch_size)
+        losses.append(loss.data[0])
+
+    if frame_idx % 1000 == 0:
+        update_target(current_model, target_model)

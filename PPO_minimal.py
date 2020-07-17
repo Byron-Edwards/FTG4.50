@@ -131,7 +131,7 @@ class timeout:
 
 
 def main():
-    env = gym.make(env_name, java_env_path=".", port=port)
+    env = gym.make(env_name, java_env_path=".", port=port, p2=p2)
     tensorboard_dir = os.path.join(save_dir, 'checkpoint', "runs", datetime.now().strftime("%Y%m%d-%H%M%S"))
     if not os.path.exists(tensorboard_dir):
         os.makedirs(tensorboard_dir)
@@ -157,7 +157,7 @@ def main():
         h_out = (torch.zeros([1, 1, hidden_size], dtype=torch.float), torch.zeros([1, 1, hidden_size], dtype=torch.float))
         try:
             with timeout(seconds=30):
-                s = env.reset(p2=p2)
+                s = env.reset()
         except TimeoutError:
             print("Time out to reset env")
             env.close()

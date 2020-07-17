@@ -116,7 +116,7 @@ if __name__ == '__main__':
     writer = SummaryWriter(log_dir=tensorboard_dir)
 
     # Create model for both learner and actor
-    env = gym.make(args.env, java_env_path=".", port=args.port)
+    env = gym.make(args.env, java_env_path=".", port=args.port, p2=args.p2)
     memory = EpisodicReplayMemory(args.memory_capacity, args.max_episode_length)
     model = ActorCritic(env.observation_space, env.action_space, args.hidden_size)
     shared_model = copy.deepcopy(model)
