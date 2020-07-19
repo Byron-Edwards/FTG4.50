@@ -19,7 +19,7 @@ from datetime import datetime
 from torch.utils.tensorboard import SummaryWriter
 from torch.distributions import Categorical
 from collections import deque, namedtuple
-from OpenAI.atari_wrappers import FrameStack
+from OpenAI.atari_wrappers import *
 # Characteristics
 # 1. Discrete action space, single thread version.
 # 2. Does not support trust-region updates.
@@ -32,7 +32,7 @@ parser.add_argument('--num-processes', type=int, default=4, metavar='N', help='N
 parser.add_argument('--T-max', type=int, default=10e7, metavar='STEPS', help='Number of training steps')
 parser.add_argument('--t-max', type=int, default=300, metavar='STEPS', help='Max number of forward steps for A3C before update')
 parser.add_argument('--max-episode-length', type=int, default=1000, metavar='LENGTH', help='Maximum episode length')
-parser.add_argument('--hidden-size', type=int, default=256, metavar='SIZE', help='Hidden size of LSTM cell')
+parser.add_argument('--hidden-size', type=int, default=32, metavar='SIZE', help='Hidden size of LSTM cell')
 parser.add_argument('--model',default="",type=str, metavar='PARAMS', help='Pretrained model (state dict)')
 parser.add_argument('--memory',default="", type=str, metavar='PARAMS', help='Pretrained model (state dict)')
 parser.add_argument('--data',default="", type=str, metavar='PARAMS', help='Pretrained model (state dict)')
@@ -356,6 +356,7 @@ def actor(rank, args, T,memory_queue,model_queue,p2):
         sum_entropy = 0
         seq_data = []
         while not done:
+            env.render()
             prob = model.pi(torch.from_numpy(s).float(), action_mask)
             sum_entropy += Categorical(probs=prob.detach()).entropy()
             a = Categorical(prob.detach()).sample().item()
@@ -420,7 +421,7 @@ if __name__ == '__main__':
     # writer = SummaryWriter(log_dir=save_dir, comment="-" + args.env + "-" + args.p2)
     memory = ReplayBuffer()
     writer = SummaryWriter(log_dir=tensorboard_dir)
-    env = FrameStack(gym.make(args.env),4)
+    env = make_env(args.env)
     # env = gym.make(args.env, java_env_path=".", port=args.port, p2=args.p2)
     model = ActorCritic(env.observation_space.shape[0], env.action_space, args.hidden_size)
     shared_model = copy.deepcopy(model)

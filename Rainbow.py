@@ -10,7 +10,8 @@ import torch.nn as nn
 import torch.optim as optim
 import torch.autograd as autograd
 import torch.nn.functional as F
-from OpenAI.atari_wrappers import FrameStack
+from torch.utils.tensorboard import SummaryWriter
+from OpenAI.atari_wrappers import *
 
 class NoisyLinear(nn.Module):
     def __init__(self, in_features, out_features, use_cuda, std_init=0.4):
@@ -236,12 +237,16 @@ class ReplayBuffer(object):
         for i in idxes:
             data = self._storage[i]
             obs_t, action, reward, obs_tp1, done = data
-            obses_t.append(np.array(obs_t, copy=False))
-            actions.append(np.array(action, copy=False))
+            obses_t.append(obs_t)
+            actions.append(action)
             rewards.append(reward)
-            obses_tp1.append(np.array(obs_tp1, copy=False))
+            obses_tp1.append(obs_tp1)
             dones.append(done)
-        return np.array(obses_t), np.array(actions), np.array(rewards), np.array(obses_tp1), np.array(dones)
+        return torch.FloatTensor(obses_t), \
+               torch.tensor(actions), \
+               torch.tensor(rewards), \
+               torch.FloatTensor(obses_tp1), \
+               torch.tensor(dones)
 
     def sample(self, batch_size):
         """Sample a batch of experiences.
@@ -429,8 +434,8 @@ class RainbowDQN(nn.Module):
     def act(self, state):
         state = state.unsqueeze(0)
         dist = self.forward(state)
-        dist = dist * torch.linspace(self.Vmin, self.Vmax, self.num_atoms)
-        action = dist.sum(2).max(1)[1].numpy()[0]
+        dist = dist * torch.linspace(self.Vmin, self.Vmax, self.num_atoms,device=torch.device("cuda"))
+        action = dist.sum(2).max(1)[1][0]
         return action
 
 
@@ -438,13 +443,14 @@ def update_target(current_model, target_model):
     target_model.load_state_dict(current_model.state_dict())
 
 
-def projection_distribution(next_state, rewards, dones):
+def projection_distribution(next_state, rewards, dones,device):
     batch_size = next_state.size(0)
 
     delta_z = float(Vmax - Vmin) / (num_atoms - 1)
-    support = torch.linspace(Vmin, Vmax, num_atoms)
+    support = torch.linspace(Vmin, Vmax, num_atoms).to(device)
+    next_state = next_state.to(device)
 
-    next_dist = target_model(next_state).data.cpu() * support
+    next_dist = target_model(next_state) * support
     next_action = next_dist.sum(2).max(1)[1]
     next_action = next_action.unsqueeze(1).unsqueeze(1).expand(next_dist.size(0), 1, next_dist.size(2))
     next_dist = next_dist.gather(1, next_action).squeeze(1)
@@ -453,37 +459,37 @@ def projection_distribution(next_state, rewards, dones):
     dones = dones.unsqueeze(1).expand_as(next_dist)
     support = support.unsqueeze(0).expand_as(next_dist)
 
-    Tz = rewards + (1 - dones) * 0.99 * support
+    Tz = rewards + (1 - dones.float()) * 0.99 * support
     Tz = Tz.clamp(min=Vmin, max=Vmax)
     b = (Tz - Vmin) / delta_z
     l = b.floor().long()
     u = b.ceil().long()
 
     offset = torch.linspace(0, (batch_size - 1) * num_atoms, batch_size).long() \
-        .unsqueeze(1).expand(batch_size, num_atoms)
+        .unsqueeze(1).expand(batch_size, num_atoms).to(device)
 
-    proj_dist = torch.zeros(next_dist.size())
+    proj_dist = torch.zeros(next_dist.size()).to(device)
     proj_dist.view(-1).index_add_(0, (l + offset).view(-1), (next_dist * (u.float() - b)).view(-1))
     proj_dist.view(-1).index_add_(0, (u + offset).view(-1), (next_dist * (b - l.float())).view(-1))
 
     return proj_dist
 
 
-def compute_td_loss(batch_size):
+def compute_td_loss(batch_size,device):
     state, action, reward, next_state, done = replay_buffer.sample(batch_size)
 
-    state = torch.FloatTensor(np.float32(state))
-    next_state = torch.FloatTensor(np.float32(next_state))
-    action = torch.LongTensor(action)
-    reward = torch.FloatTensor(reward)
-    done = torch.FloatTensor(np.float32(done))
+    state = state.to(device)
+    next_state = next_state.to(device)
+    action = action.to(device)
+    reward = reward.to(device)
+    done = done.to(device)
 
-    proj_dist = projection_distribution(next_state, reward, done)
+    proj_dist = projection_distribution(next_state, reward, done,device)
 
     dist = current_model(state)
     action = action.unsqueeze(1).unsqueeze(1).expand(batch_size, 1, num_atoms)
     dist = dist.gather(1, action).squeeze(1)
-    dist.data.clamp_(0.01, 0.99)
+    dist.clamp_(0.01, 0.99)
     loss = -(proj_dist * dist.log()).sum(1)
     loss = loss.mean()
 
@@ -503,46 +509,52 @@ Vmax = 10
 num_frames = 1500000
 batch_size = 32
 gamma = 0.99
-env_id = "Pong-ram-v0"
+env_id = "CartPole-v0"
 
+writer = SummaryWriter(log_dir="OpenAI/Rainbow/")
 USE_CUDA = torch.cuda.is_available()
-device = torch.device("cuda")
-env = FrameStack(gym.make(env_id),4)
+device = torch.device("cuda") if USE_CUDA else torch.device("cpu")
+env = gym.make(env_id)
 current_model = RainbowDQN(env.observation_space.shape[0], env.action_space.n, num_atoms, Vmin, Vmax, USE_CUDA)
 target_model = RainbowDQN(env.observation_space.shape[0], env.action_space.n, num_atoms, Vmin, Vmax, USE_CUDA)
-current_model.to(device)
-target_model.to(device)
 
 if USE_CUDA:
     current_model = current_model.cuda()
     target_model = target_model.cuda()
 
-optimizer = optim.Adam(current_model.parameters(), 0.001)
-replay_buffer = ReplayBuffer(10000)
+optimizer = optim.Adam(current_model.parameters(), 0.00001)
+replay_buffer = ReplayBuffer(100000)
 update_target(current_model, target_model)
 
 losses = []
 all_rewards = []
 episode_reward = 0
-
+frame_idx = 0
 state = env.reset()
-for frame_idx in range(1, num_frames + 1):
-    action = current_model.act(torch.FloatTensor(state).to(device))
+while True:
+    env.render()
+    state = torch.FloatTensor(state).to(device)
+    action = current_model.act(state)
 
-    next_state, reward, done, _ = env.step(action)
-    replay_buffer.push(state, action, reward, next_state, done)
+    next_state, reward, done, _ = env.step(action.cpu().numpy())
+    replay_buffer.push(state.cpu().numpy(), action.item(), reward, next_state, done)
 
     state = next_state
     episode_reward += reward
+    frame_idx += 1
 
     if done:
         state = env.reset()
         all_rewards.append(episode_reward)
         episode_reward = 0
+        m_score = np.mean(all_rewards[-100:])
+        print(m_score)
+        writer.add_scalar("reward/mean_score", m_score, frame_idx)
 
     if len(replay_buffer) > batch_size:
-        loss = compute_td_loss(batch_size)
-        losses.append(loss.data[0])
+        loss = compute_td_loss(batch_size,device)
+        losses.append(loss.item())
 
     if frame_idx % 1000 == 0:
         update_target(current_model, target_model)
+

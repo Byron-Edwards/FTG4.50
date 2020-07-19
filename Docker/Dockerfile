@@ -89,8 +89,11 @@ RUN DEBIAN_FRONTEND=noninteractive apt-get -qq update \
 && cd FTG4.50 \
 && git clone https://github.com/Byron-Edwards/Gym-FightingICE.git \
 && cd Gym-FightingICE \
-&& pip3 install -e .
+&& pip3 install -e . 
 
+RUN cd /dev \
+&& MAKEDEV input \
+&& MAKEDEV input
 #---------------------------------------------------------------------
 # Startup
 #---------------------------------------------------------------------
