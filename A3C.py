@@ -13,7 +13,7 @@ from OpenAI.atari_wrappers import make_ftg_ram
 from gym_fightingice.envs.Machete import Machete
 
 # Hyperparameters
-n_train_processes = 4
+n_train_processes = 1
 save_interval = 20
 save_dir = "./OpenAI/A3C"
 learning_rate = 0.0002
@@ -22,7 +22,7 @@ gamma = 0.98
 hidden_size = 256
 entropy_weight = 0.01
 env_name = "FightingiceDataFrameskip-v0"
-p2 = Machete
+p2 = "ReiwaThunder"
 
 
 class Counter():
@@ -173,6 +173,9 @@ if __name__ == '__main__':
     state_shape = env.observation_space.shape[0]
     action_shape = env.action_space.n
     global_model = ActorCritic(state_shape, action_shape, hidden_size)
+    if os.path.exists(os.path.join(save_dir, "model")):
+        global_model.load_state_dict(torch.load(os.path.join(save_dir, "model")))
+        print("load model")
     global_model.share_memory()
     T = Counter()
     scores = mp.Manager().list()
@@ -186,7 +189,7 @@ if __name__ == '__main__':
         # else:
         p = mp.Process(target=train, args=(global_model, rank, T, scores))
         p.start()
-        time.sleep(10)
+        time.sleep(15)
         processes.append(p)
     for p in processes:
         p.join()
