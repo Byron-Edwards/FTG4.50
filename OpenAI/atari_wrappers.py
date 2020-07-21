@@ -3,10 +3,27 @@ import os
 os.environ.setdefault('PATH', '')
 from collections import deque
 import gym
+import gym_fightingice
+import signal
 from gym import spaces
 import cv2
 cv2.ocl.setUseOpenCL(False)
 
+
+class timeout:
+    def __init__(self, seconds=1, error_message='Timeout'):
+        self.seconds = seconds
+        self.error_message = error_message
+
+    def handle_timeout(self, signum, frame):
+        raise TimeoutError(self.error_message)
+
+    def __enter__(self):
+        signal.signal(signal.SIGALRM, self.handle_timeout)
+        signal.alarm(self.seconds)
+
+    def __exit__(self, type, value, traceback):
+        signal.alarm(0)
 
 class TimeLimit(gym.Wrapper):
     def __init__(self, env, max_episode_steps=None):
@@ -244,6 +261,7 @@ class FrameStack(gym.Wrapper):
         assert len(self.frames) == self.k
         return LazyFrames(list(self.frames)).__array__()
 
+
 class ScaledFloatFrame(gym.ObservationWrapper):
     def __init__(self, env):
         gym.ObservationWrapper.__init__(self, env)
@@ -253,6 +271,27 @@ class ScaledFloatFrame(gym.ObservationWrapper):
         # careful! This undoes the memory optimization, use
         # with smaller replay buffers only.
         return np.array(observation).astype(np.float32) / 255.0
+
+
+class BufferWrapper(gym.ObservationWrapper):
+    def __init__(self, env, n_steps, dtype=np.float32):
+        super(BufferWrapper, self).__init__(env)
+        self.dtype = dtype
+        old_space = env.observation_space
+        self.observation_space = gym.spaces.Box(
+            old_space.low.repeat(n_steps, axis=0),
+            old_space.high.repeat(n_steps, axis=0), dtype=dtype)
+
+    def reset(self):
+        self.buffer = np.zeros_like(
+            self.observation_space.low, dtype=self.dtype)
+        return self.observation(self.env.reset())
+
+    def observation(self, observation):
+        self.buffer[:-1] = self.buffer[1:]
+        self.buffer[-1] = observation
+        return self.buffer
+
 
 class LazyFrames(object):
     def __init__(self, frames):
@@ -291,6 +330,18 @@ class LazyFrames(object):
     def frame(self, i):
         return self._force()[..., i]
 
+
+class ImageToPyTorch(gym.ObservationWrapper):
+    def __init__(self, env):
+        super(ImageToPyTorch, self).__init__(env)
+        old_shape = self.observation_space.shape
+        new_shape = (old_shape[-1], old_shape[0], old_shape[1])
+        self.observation_space = gym.spaces.Box(
+            low=0.0, high=1.0, shape=new_shape, dtype=np.float32)
+
+    def observation(self, observation):
+        return np.moveaxis(observation, 2, 0)
+
 def make_atari(env_id, max_episode_steps=None):
     env = gym.make(env_id)
     assert 'NoFrameskip' in env.spec.id
@@ -325,3 +376,41 @@ def make_env(env_name):
     return ScaledFloatFrame(env)
 
 
+class FTGWrapper(gym.Wrapper):
+    def __init__(self, env, p2):
+        gym.Wrapper.__init__(self, env)
+        self.p2 = p2
+
+    def reset(self):
+        while True:
+            try:
+                with timeout(seconds=60):
+                    s = self.env.reset(p2=self.p2)
+                    break
+            except TimeoutError:
+                print("Time out to reset env")
+                self.env.close()
+                continue
+        return s
+
+    def step(self, action):
+        ob, reward, done, info = self.env.step(action)
+        # if info.get('isControl', True):
+        if info.get('no_data_receive', False):
+            self.env.close()
+            done = True
+        return ob, reward, done, info
+
+
+def make_ftg_display(env_name, p2, port=4000, java_env_path="."):
+    env = gym.make(env_name, java_env_path=java_env_path, port=port)
+    env = FTGWrapper(env, p2)
+    env = FrameStack(env, 10)
+    env = ImageToPyTorch(env)
+    return env
+
+
+def make_ftg_ram(env_name, p2, port=4000, java_env_path="."):
+    env = gym.make(env_name, java_env_path=java_env_path, port=port)
+    env = FTGWrapper(env, p2)
+    return env
