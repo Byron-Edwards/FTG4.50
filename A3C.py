@@ -1,6 +1,7 @@
 import gym
 import gym_fightingice
 import torch
+import os
 import numpy as np
 import time
 import torch.nn as nn
@@ -13,6 +14,8 @@ from gym_fightingice.envs.Machete import Machete
 
 # Hyperparameters
 n_train_processes = 4
+save_interval = 20
+save_dir = "./OpenAI/A3C"
 learning_rate = 0.0002
 update_interval = 5
 gamma = 0.98
@@ -20,6 +23,24 @@ hidden_size = 256
 entropy_weight = 0.01
 env_name = "FightingiceDataFrameskip-v0"
 p2 = Machete
+
+
+class Counter():
+    def __init__(self):
+        self.val = mp.Value('i', 0)
+        self.lock = mp.Lock()
+
+    def increment(self):
+        with self.lock:
+            self.val.value += 1
+
+    def set(self, value):
+        with self.lock:
+            self.val.value = value
+
+    def value(self):
+        with self.lock:
+            return self.val.value
 
 
 class ActorCritic(nn.Module):
@@ -41,15 +62,14 @@ class ActorCritic(nn.Module):
         return v
 
 
-def train(global_model, rank,):
+def train(global_model, rank, T, scores):
     env = make_ftg_ram(env_name, p2=p2,port=4000 + rank * 2)
     state_shape = env.observation_space.shape[0]
     action_shape = env.action_space.n
     local_model = ActorCritic(state_shape, action_shape, hidden_size)
     local_model.load_state_dict(global_model.state_dict())
     optimizer = optim.Adam(global_model.parameters(), lr=learning_rate)
-    n_epi = 0
-    scores = []
+
     while True:
         discard = False
         done = False
@@ -108,10 +128,16 @@ def train(global_model, rank,):
             local_model.load_state_dict(global_model.state_dict())
         if discard:
             continue
-        n_epi += 1
+        T.increment()
+        t = T.value()
         scores.append(score)
         m_score = np.mean(scores[-100:])
-        print("# of episode :{}, mean score : {:.1f}, entropy: {}, steps: {}".format(n_epi, m_score, sum_entropy/step, step))
+        print("# of episode :{}, round score: {}, mean score : {:.1f}, entropy: {}, steps: {}".format(t, score, m_score, sum_entropy/step, step))
+        if t % save_interval == 0 and t > 0:
+            torch.save(global_model.state_dict(), os.path.join(save_dir, "model"))
+            print("Saving model at episode:{}".format(t))
+
+
 
     # env.close()
     # print("Training process {} reached maximum episode.".format(rank))
@@ -141,11 +167,15 @@ def test(global_model):
 
 
 if __name__ == '__main__':
+    if not os.path.exists(save_dir):
+        os.makedirs(save_dir)
     env = make_ftg_ram(env_name, p2=p2)
     state_shape = env.observation_space.shape[0]
     action_shape = env.action_space.n
     global_model = ActorCritic(state_shape, action_shape, hidden_size)
     global_model.share_memory()
+    T = Counter()
+    scores = mp.Manager().list()
     env.close()
     del env
 
@@ -154,7 +184,7 @@ if __name__ == '__main__':
         # if rank == 0:
             # p = mp.Process(target=test, args=(global_model,))
         # else:
-        p = mp.Process(target=train, args=(global_model, rank,))
+        p = mp.Process(target=train, args=(global_model, rank, T, scores))
         p.start()
         time.sleep(10)
         processes.append(p)

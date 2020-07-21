@@ -28,7 +28,7 @@ from OpenAI.atari_wrappers import *
 parser = argparse.ArgumentParser(description='ACER')
 parser.add_argument('--seed', type=int, default=123, help='Random seed')
 parser.add_argument('--cuda', type=bool, default=True, help='cuda Device')
-parser.add_argument('--num-processes', type=int, default=4, metavar='N', help='Number of training async agents (does not include single validation agent)')
+parser.add_argument('--num-processes', type=int, default=1, metavar='N', help='Number of training async agents (does not include single validation agent)')
 parser.add_argument('--T-max', type=int, default=10e7, metavar='STEPS', help='Number of training steps')
 parser.add_argument('--t-max', type=int, default=300, metavar='STEPS', help='Max number of forward steps for A3C before update')
 parser.add_argument('--max-episode-length', type=int, default=1000, metavar='LENGTH', help='Maximum episode length')
@@ -59,10 +59,10 @@ parser.add_argument('--evaluate', action='store_true', help='Evaluate only')
 parser.add_argument('--evaluation-interval', type=int, default=25000, metavar='STEPS', help='Number of training steps between evaluations (roughly)')
 parser.add_argument('--evaluation-episodes', type=int, default=20, metavar='N', help='Number of evaluation episodes to average over')
 parser.add_argument('--render', action='store_true', help='Render evaluation agent')
-parser.add_argument('--name', type=str, default='./OpenAI/Atari', help='Save folder')
-parser.add_argument('--env', type=str, default='Pong-ram-v0',help='environment name')
+parser.add_argument('--name', type=str, default='./OpenAI/ACER', help='Save folder')
+parser.add_argument('--env', type=str, default='FightingiceDataNoFrameskip-v0',help='environment name')
 parser.add_argument('--port', type=int, default=5000,help='FightingICE running Port')
-parser.add_argument('--p2', type=str, default="RHEA_PI",help='FightingICE running Port')
+parser.add_argument('--p2', type=str, default="Toothless",help='FightingICE running Port')
 args = parser.parse_args()
 
 
@@ -322,9 +322,9 @@ def train(model, average_model, t, optimizer, memory, on_policy=False, device=to
 
 def actor(rank, args, T,memory_queue,model_queue,p2):
     torch.manual_seed(args.seed + rank)
-    env = FrameStack(gym.make(args.env), 4)
-    # env = gym.make(args.env, java_env_path=".", port=args.port + rank * 2, p2=p2)
-    # print("Process {} fighting with {}".format(rank, p2))
+    # env = FrameStack(gym.make(args.env), 4)
+    env = gym.make(args.env, java_env_path=".", port=args.port + rank * 2, p2=p2)
+    print("Process {} fighting with {}".format(rank, p2))
     env.seed(args.seed + rank)
     model = ActorCritic(env.observation_space.shape[0], env.action_space,args.hidden_size)
     n_epi = 0
@@ -334,7 +334,7 @@ def actor(rank, args, T,memory_queue,model_queue,p2):
         t_value = T.value()
         try:
             with timeout(seconds=30):
-                s = env.reset()
+                s = env.reset(p2=p2)
                 # opp_s = flip_obs(s)
         except TimeoutError:
             print("Time out to reset env")
@@ -421,8 +421,8 @@ if __name__ == '__main__':
     # writer = SummaryWriter(log_dir=save_dir, comment="-" + args.env + "-" + args.p2)
     memory = ReplayBuffer()
     writer = SummaryWriter(log_dir=tensorboard_dir)
-    env = make_env(args.env)
-    # env = gym.make(args.env, java_env_path=".", port=args.port, p2=args.p2)
+    # env = make_env(args.env)
+    env = gym.make(args.env, java_env_path=".", port=args.port, p2=args.p2)
     model = ActorCritic(env.observation_space.shape[0], env.action_space, args.hidden_size)
     shared_model = copy.deepcopy(model)
     model.to(device)
@@ -430,7 +430,7 @@ if __name__ == '__main__':
         average_model = copy.deepcopy(model)
         average_model.to(device)
     else:
-        average_model =  None
+        average_model = None
     optimizer = optim.RMSprop(model.parameters(), lr=args.lr)
     scores = []
     m_scores = []
@@ -456,11 +456,11 @@ if __name__ == '__main__':
     memory_queue = mp.SimpleQueue()
     model_queue = mp.SimpleQueue()
     processes = []
-    p2_list = ["ReiwaThunder","RHEA_PI","Toothless","FalzAI"]
+    p2_list = ["ReiwaThunder", "RHEA_PI", "Toothless", "FalzAI"]
     if not args.evaluate:
         # Start training agents
         for rank in range(1, args.num_processes + 1):
-            # p2 = p2_list[(rank-1) % len(p2_list)]
+            p2 = p2_list[(rank-1) % len(p2_list)]
             model_queue.put(shared_model.state_dict())
             p = mp.Process(target=actor, args=(rank, args, T, memory_queue, model_queue, args.p2))
             p.start()

@@ -384,7 +384,7 @@ class FTGWrapper(gym.Wrapper):
     def reset(self):
         while True:
             try:
-                with timeout(seconds=60):
+                with timeout(seconds=30):
                     s = self.env.reset(p2=self.p2)
                     break
             except TimeoutError:
