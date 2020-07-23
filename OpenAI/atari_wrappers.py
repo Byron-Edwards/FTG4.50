@@ -386,7 +386,10 @@ class FTGWrapper(gym.Wrapper):
             try:
                 with timeout(seconds=30):
                     s = self.env.reset(p2=self.p2)
-                    break
+                    if isinstance(s, list):
+                        continue
+                    if isinstance(s, np.ndarray):
+                        break
             except TimeoutError:
                 print("Time out to reset env")
                 self.env.close()

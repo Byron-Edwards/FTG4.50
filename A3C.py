@@ -13,7 +13,7 @@ from OpenAI.atari_wrappers import make_ftg_ram
 from gym_fightingice.envs.Machete import Machete
 
 # Hyperparameters
-n_train_processes = 1
+n_train_processes = 4
 save_interval = 20
 save_dir = "./OpenAI/A3C"
 learning_rate = 0.0002
@@ -22,7 +22,7 @@ gamma = 0.98
 hidden_size = 256
 entropy_weight = 0.01
 env_name = "FightingiceDataFrameskip-v0"
-p2 = "ReiwaThunder"
+p2 = "Toothless"
 
 
 class Counter():
@@ -63,7 +63,7 @@ class ActorCritic(nn.Module):
 
 
 def train(global_model, rank, T, scores):
-    env = make_ftg_ram(env_name, p2=p2,port=4000 + rank * 2)
+    env = make_ftg_ram(env_name, p2=p2, port=40000 + rank)
     state_shape = env.observation_space.shape[0]
     action_shape = env.action_space.n
     local_model = ActorCritic(state_shape, action_shape, hidden_size)
@@ -163,7 +163,6 @@ def test(global_model):
             print("# of episode :{}, avg score : {:.1f}".format(
                 n_epi, score/print_interval))
             score = 0.0
-            time.sleep(10)
 
 
 if __name__ == '__main__':
