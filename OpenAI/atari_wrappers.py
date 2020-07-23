@@ -413,7 +413,10 @@ def make_ftg_display(env_name, p2, port=4000, java_env_path="."):
     return env
 
 
-def make_ftg_ram(env_name, p2, port=4000, java_env_path="."):
-    env = gym.make(env_name, java_env_path=java_env_path, port=port)
+def make_ftg_ram(env_name, p2, port=None, java_env_path="."):
+    if port is None:
+        env = gym.make(env_name, java_env_path=java_env_path)
+    else:
+        env = gym.make(env_name, java_env_path=java_env_path, port=port)
     env = FTGWrapper(env, p2)
     return env
