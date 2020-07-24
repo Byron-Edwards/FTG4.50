@@ -132,7 +132,7 @@ def train(global_model, rank, T, scores):
         t = T.value()
         scores.append(score)
         m_score = np.mean(scores[-100:])
-        print("# of episode :{}, round score: {}, mean score : {:.1f}, entropy: {}, steps: {}".format(t, score, m_score, sum_entropy/step, step))
+        print("Process {}, # of episode :{}, round score: {}, mean score : {:.1f}, entropy: {}, steps: {}".format(rank, t, score, m_score, sum_entropy/step, step))
         if t % save_interval == 0 and t > 0:
             torch.save(global_model.state_dict(), os.path.join(save_dir, "model"))
             print("Saving model at episode:{}".format(t))
