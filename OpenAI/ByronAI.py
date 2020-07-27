@@ -59,7 +59,6 @@ class ByronAI(object):
         self.model = ActorCriticNumpy(MODEL_STATE)
         self._actions = "AIR AIR_A AIR_B AIR_D_DB_BA AIR_D_DB_BB AIR_D_DF_FA AIR_D_DF_FB AIR_DA AIR_DB AIR_F_D_DFA AIR_F_D_DFB AIR_FA AIR_FB AIR_GUARD AIR_GUARD_RECOV AIR_RECOV AIR_UA AIR_UB BACK_JUMP BACK_STEP CHANGE_DOWN CROUCH CROUCH_A CROUCH_B CROUCH_FA CROUCH_FB CROUCH_GUARD CROUCH_GUARD_RECOV CROUCH_RECOV DASH DOWN FOR_JUMP FORWARD_WALK JUMP LANDING NEUTRAL RISE STAND STAND_A STAND_B STAND_D_DB_BA STAND_D_DB_BB STAND_D_DF_FA STAND_D_DF_FB STAND_D_DF_FC STAND_F_D_DFA STAND_F_D_DFB STAND_FA STAND_FB STAND_GUARD STAND_GUARD_RECOV STAND_RECOV THROW_A THROW_B THROW_HIT THROW_SUFFER"
         self.action_strs = self._actions.split(" ")
-        self.pre_framedata = None
         self.frameskip = frameskip
 
     def close(self):
@@ -119,27 +118,6 @@ class ByronAI(object):
         self.cc.commandCall(self.action_strs[action])
         if not self.frameskip:
             self.inputKey = self.cc.getSkillKey()
-        self.pre_framedata = self.frameData
-
-    def get_reward(self):
-        try:
-            if self.pre_framedata.getEmptyFlag() or self.frameData.getEmptyFlag():
-                reward = 0
-            else:
-                p2_hp_pre = self.pre_framedata.getCharacter(False).getHp()
-                p1_hp_pre = self.pre_framedata.getCharacter(True).getHp()
-                p2_hp_now = self.frameData.getCharacter(False).getHp()
-                p1_hp_now = self.frameData.getCharacter(True).getHp()
-                if self.player:
-                    reward = (p2_hp_pre-p2_hp_now) - (p1_hp_pre-p1_hp_now)
-                    # reward shaping
-                    if p2_hp_pre-p2_hp_now <= 0 and self.last_action in self._attacks.split():
-                        reward -= 0.1
-                else:
-                    reward = (p1_hp_pre-p1_hp_now) - (p2_hp_pre-p2_hp_now)
-        except:
-            reward = 0
-        return reward
 
     def get_obs(self):
         my = self.frameData.getCharacter(self.player)
