@@ -1,16 +1,10 @@
 import numpy as np
+import pickle
+import os
 from collections import OrderedDict
-np.set_printoptions(precision=32)
 
 
-def state_dict_trans(state_dict):
-    new_dict = OrderedDict()
-    for param_tensor in state_dict:
-        new_dict[param_tensor] = state_dict[param_tensor].numpy()
-    return new_dict
-
-
-class ActorCritic:
+class ActorCriticNumpy:
 
     class Linear:
         def __init__(self, weight, bias):
@@ -31,37 +25,41 @@ class ActorCritic:
         return np.exp(x) / np.sum(np.exp(x), axis=dim,)
 
     def __init__(self, state_dict):
-        self.state_dict = state_dict
+        if isinstance(state_dict, str):
+            f = open(state_dict, "rb")
+            self.state_dict = pickle.load(f)
+            f.close()
+        else:
+            self.state_dict = state_dict
+
         self.fc1 = self.Linear(self.state_dict["fc1.weight"], self.state_dict["fc1.bias"])
         self.fc_pi = self.Linear(self.state_dict["fc_pi.weight"], self.state_dict["fc_pi.bias"])
         self.fc_v = self.Linear(self.state_dict["fc_v.weight"], self.state_dict["fc_v.bias"])
 
     def pi(self, x, softmax_dim=0):
+        x = x.astype('float64')
         x = self.relu(self.fc1(x))
         x = self.fc_pi(x)
         prob = np.clip(a=self.softmax(x, dim=softmax_dim), a_max=1-1e-20, a_min=1e-20)
         return prob
 
     def v(self, x):
+        x = x.astype('float64')
         x = self.relu(self.fc1(x))
         v = self.fc_v(x)
         return v
 
 
 class ByronAI(object):
-    def __init__(self, gateway, pipe, frameskip=True):
+    def __init__(self, gateway, frameskip=True):
         self.gateway = gateway
-        self.pipe = pipe
-
-        self.width = 96  # The width of the display to obtain
-        self.height = 64  # The height of the display to obtain
-        self.grayscale = True  # The display's color to obtain true for grayscale, false for RGB
-
         self.obs = None
         self.just_inited = True
-
+        MODEL_STATE = "/home/byron/Repos/FTG4.50/OpenAI/ByronAI.numpy"
+        self.model = ActorCriticNumpy(MODEL_STATE)
         self._actions = "AIR AIR_A AIR_B AIR_D_DB_BA AIR_D_DB_BB AIR_D_DF_FA AIR_D_DF_FB AIR_DA AIR_DB AIR_F_D_DFA AIR_F_D_DFB AIR_FA AIR_FB AIR_GUARD AIR_GUARD_RECOV AIR_RECOV AIR_UA AIR_UB BACK_JUMP BACK_STEP CHANGE_DOWN CROUCH CROUCH_A CROUCH_B CROUCH_FA CROUCH_FB CROUCH_GUARD CROUCH_GUARD_RECOV CROUCH_RECOV DASH DOWN FOR_JUMP FORWARD_WALK JUMP LANDING NEUTRAL RISE STAND STAND_A STAND_B STAND_D_DB_BA STAND_D_DB_BB STAND_D_DF_FA STAND_D_DF_FB STAND_D_DF_FC STAND_F_D_DFA STAND_F_D_DFB STAND_FA STAND_FB STAND_GUARD STAND_GUARD_RECOV STAND_RECOV THROW_A THROW_B THROW_HIT THROW_SUFFER"
         self.action_strs = self._actions.split(" ")
+        self.pre_framedata = None
         self.frameskip = frameskip
 
     def close(self):
@@ -71,29 +69,19 @@ class ByronAI(object):
         self.inputKey = self.gateway.jvm.struct.Key()
         self.frameData = self.gateway.jvm.struct.FrameData()
         self.cc = self.gateway.jvm.aiinterface.CommandCenter()
-
-        # self.get_obs()
-
         self.player = player
         self.gameData = gameData
-
+        self.isGameJustStarted = True
         return 0
 
     # please define this method when you use FightingICE version 3.20 or later
     def roundEnd(self, p1hp, p2hp, frames):
-        print("send round end to {}".format(self.pipe))
-        self.pipe.send([self.obs, self.get_reward(), True, {}])
         self.just_inited = True
         if p1hp <= p2hp:
-            self.reward -= 1
             print("Lost, p1hp:{}, p2hp:{}, frame used: {}".format(p1hp,  p2hp, frames))
         elif p1hp > p2hp:
-            self.reward += 1
             print("Win!, p1hp:{}, p2hp:{}, frame used: {}".format(p1hp,  p2hp, frames))
-        # request = self.pipe.recv()
-        # if request == "close":
-        #     return
-        self.obs = None
+        # self.obs = None
 
     # Please define this method when you use FightingICE version 4.00 or later
     def getScreenData(self, sd):
@@ -127,10 +115,11 @@ class ByronAI(object):
             self.inputKey.empty()
             self.cc.skillCancel()
 
-        action = self.get_obs()
-
+        action = np.argmax(self.model.pi(self.get_obs()))
         self.cc.commandCall(self.action_strs[action])
-
+        if not self.frameskip:
+            self.inputKey = self.cc.getSkillKey()
+        self.pre_framedata = self.frameData
 
     def get_reward(self):
         try:

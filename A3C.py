@@ -10,12 +10,15 @@ import torch.optim as optim
 from torch.distributions import Categorical
 import torch.multiprocessing as mp
 from OpenAI.atari_wrappers import make_ftg_ram
-from gym_fightingice.envs.Machete import Machete
+from model_parameter_trans import state_dict_trans
+# from gym_fightingice.envs.Machete import Machete
+# from OpenAI.ByronAI import ActorCriticNumpy
 
 # Hyperparameters
-n_train_processes = 8
+n_train_processes = 1
 save_interval = 20
 save_dir = "./OpenAI/A3C"
+numpy_para = "ByronAI.numpy"
 learning_rate = 0.0002
 update_interval = 5
 gamma = 0.98
@@ -68,6 +71,8 @@ def train(global_model, rank, T, scores):
     action_shape = env.action_space.n
     local_model = ActorCritic(state_shape, action_shape, hidden_size)
     local_model.load_state_dict(global_model.state_dict())
+    # MODEL_STATE = "/home/byron/Repos/FTG4.50/OpenAI/ByronAI.numpy"
+    # test_model = ActorCriticNumpy(MODEL_STATE)
     optimizer = optim.Adam(global_model.parameters(), lr=learning_rate)
 
     while True:
@@ -81,6 +86,9 @@ def train(global_model, rank, T, scores):
             s_lst, a_lst, r_lst = [], [], []
             for t in range(update_interval):
                 prob = local_model.pi(torch.from_numpy(s).float())
+                # test_prob = test_model.pi(s)
+                # diff = prob.detach().numpy() - test_prob
+                # print(diff.sum())
                 m = Categorical(prob)
                 a = m.sample().item()
                 s_prime, r, done, info = env.step(a)
@@ -135,12 +143,8 @@ def train(global_model, rank, T, scores):
         print("Process {}, # of episode :{}, round score: {}, mean score : {:.1f}, entropy: {}, steps: {}".format(rank, t, score, m_score, sum_entropy/step, step))
         if t % save_interval == 0 and t > 0:
             torch.save(global_model.state_dict(), os.path.join(save_dir, "model"))
+            state_dict_trans(global_model.state_dict(), os.path.join(save_dir, numpy_para))
             print("Saving model at episode:{}".format(t))
-
-
-
-    # env.close()
-    # print("Training process {} reached maximum episode.".format(rank))
 
 
 def test(global_model):
@@ -174,6 +178,7 @@ if __name__ == '__main__':
     global_model = ActorCritic(state_shape, action_shape, hidden_size)
     if os.path.exists(os.path.join(save_dir, "model")):
         global_model.load_state_dict(torch.load(os.path.join(save_dir, "model")))
+        # state_dict_trans(global_model.state_dict(), os.path.join(save_dir, numpy_para))
         print("load model")
     global_model.share_memory()
     T = Counter()
