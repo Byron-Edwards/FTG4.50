@@ -6,15 +6,17 @@ from collections import OrderedDict
 
 
 class StylizedAI(object):
-    def __init__(self, gateway, frameskip=True):
+    def __init__(self, gateway, frameskip=True,agent_type=0):
         self.gateway = gateway
         self.obs = None
         self.just_inited = True
         self._actions = "AIR AIR_A AIR_B AIR_D_DB_BA AIR_D_DB_BB AIR_D_DF_FA AIR_D_DF_FB AIR_DA AIR_DB AIR_F_D_DFA AIR_F_D_DFB AIR_FA AIR_FB AIR_GUARD AIR_GUARD_RECOV AIR_RECOV AIR_UA AIR_UB BACK_JUMP BACK_STEP CHANGE_DOWN CROUCH CROUCH_A CROUCH_B CROUCH_FA CROUCH_FB CROUCH_GUARD CROUCH_GUARD_RECOV CROUCH_RECOV DASH DOWN FOR_JUMP FORWARD_WALK JUMP LANDING NEUTRAL RISE STAND STAND_A STAND_B STAND_D_DB_BA STAND_D_DB_BB STAND_D_DF_FA STAND_D_DF_FB STAND_D_DF_FC STAND_F_D_DFA STAND_F_D_DFB STAND_FA STAND_FB STAND_GUARD STAND_GUARD_RECOV STAND_RECOV THROW_A THROW_B THROW_HIT THROW_SUFFER"
         self._action_air = "AIR_GUARD AIR_A AIR_B AIR_DA AIR_DB AIR_FA AIR_FB AIR_UA AIR_UB AIR_D_DF_FA AIR_D_DF_FB AIR_F_D_DFA AIR_F_D_DFB AIR_D_DB_BA AIR_D_DB_BB"
-        self._action_ground = "STAND_D_DB_BA BACK_STEP FORWARD_WALK DASH JUMP FOR_JUMP  BACK_JUMP STAND_GUARD CROUCH_GUARD THROW_A THROW_B STAND_A STAND_B CROUCH_A CROUCH_B STAND_FA STAND_FB CROUCH_FA CROUCH_FB STAND_D_DF_FA STAND_D_DF_FB STAND_F_D_DFA STAND_F_D_DFB STAND_D_DB_BB"
-        self._action_guard = "AIR_GUARD STAND_GUARD CROUCH_GUARD"
+        self._action_ground = "STAND_D_DB_BA BACK_STEP FORWARD_WALK DASH JUMP FOR_JUMP BACK_JUMP STAND_GUARD CROUCH_GUARD THROW_A THROW_B STAND_A STAND_B CROUCH_A CROUCH_B STAND_FA STAND_FB CROUCH_FA CROUCH_FB STAND_D_DF_FA STAND_D_DF_FB STAND_F_D_DFA STAND_F_D_DFB STAND_D_DB_BB"
+        self._valid_action = self._action_air + " " + self._action_ground
         self.action_strs = self._actions.split(" ")
+        self.agent_type_strs = ["Aggressive", "Mixing", "Defensive"] # First create three type, later extend to 5
+        self.agent_type = agent_type
         self.frameskip = frameskip
 
     def close(self):
@@ -26,6 +28,8 @@ class StylizedAI(object):
         self.cc = self.gateway.jvm.aiinterface.CommandCenter()
         self.player = player
         self.gameData = gameData
+        self.my_motion = self.gameData.getMotionData(self.player)
+        self.opp_motion = self.gameData.getMotionData(not self.player)
         self.isGameJustStarted = True
         return 0
 
@@ -55,7 +59,22 @@ class StylizedAI(object):
     def gameEnd(self):
         pass
 
-    def ImDown(self):
+    # the following functions are used to Judge the current situation
+    def at_advantage(self):
+        return self.myHp > self.oppHp
+
+    def opp_attack_before_active(self,action):
+        pass
+
+    # TODO: implement this function later to replace the simple distance judgement in battle
+    def is_in_hit_area(self, action):
+        pass
+
+    # TODO: implement this function later to replayce the simple energy judgement in battle
+    def is_enough_energy(self, action):
+        pass
+
+    def is_down(self):
         if self.myAction.equals(self.gateway.jvm.enumerate.Action.DOWN) \
                 or self.myAction.equals(self.gateway.jvm.enumerate.Action.RISE) \
                 or self.myAction.equals(self.gateway.jvm.enumerate.Action.CHANGE_DOWN):
@@ -63,39 +82,51 @@ class StylizedAI(object):
         else:
             return False
 
-    def canHallWall(self, player_number, threshold):
+    def can_hall_wall(self, player_number, threshold):
         (my, opp) = (self.my, self.opp) if player_number else (my, opp) = (self.opp, self.my)
         if my.getRight() < opp.getRight() and self.gameData.getStageWidth() - opp.getRight() < threshold: return True
         if opp.getLeft() < my.getLeft() and opp.getLeft() < threshold: return True
         return False
 
+    # the following functions are used to perform the actions
+    # Defence response when opp perform attack before attack active frame
     def defence(self):
         if self.myState.equals(self.gateway.jvm.enumerate.State.AIR):
             return "AIR_GUARD"
-        if self.oppAction is not None and (self.oppAction.getAttackType() == 1 or self.oppAction.getAttackType() == 2 ):
+        if self.oppAction.getAttackType() == 1 or self.oppAction.getAttackType() == 2:
             return "STAND_GUARD"
-        elif self.oppAction is not None and (self.oppAction.getAttackType() == 3):
+        elif self.oppAction.getAttackType() == 3:
             return "CROUCH_GUARD"
 
+    # dodge response when opp perform attack before attack active frame
     def dodge(self):
+        if self.myState.equals(self.gateway.jvm.enumerate.State.AIR):
+            return "AIR_GUARD"
+        if (self.myLeft>=150 and self.myFront) or (self.gameData.getStageWidth() - self.myRight >=150 and not self.myFront):
+            if self.oppState.equal(self.gateway.jvm.enumerate.State.AIR):
+                return "BACK_STEP"
+            else:
+                return "BACK_JUMP"
+        # Already including the attach when opp in air (attacktype == 2), need to test
+        if self.oppAction.getAttackType() == 1 or self.oppAction.getAttackType() == 2:
+            return "CROUCH"
+        elif self.oppAction.getAttackType() == 3:
+            return "JUMP"
 
-
-    def attack(self):
+    # Active attack behavior when opp is not using attack or after the opp attack active frame
+    def active_attack(self):
         pass
 
 
-    def MoveClose(self):
+    # Distance control by moving actions
+    def move_closer(self):
             return random.choice(["FOR_JUMP","FORWARD_WALK","DASH"])
 
-    def MoveFar(self):
+    def move_far(self):
             return random.choice(["BACK_JUMP","BACK_STEP"])
 
-    def NonAction(self):
+    def neutral(self):
         return "NEUTRAL"
-
-
-
-
 
     def processing(self):
         if self.frameData.getEmptyFlag() or self.frameData.getRemainingTime() <= 0:
@@ -125,9 +156,11 @@ class StylizedAI(object):
         self.myRight = self.my.getRight()  # 960
         self.myTop = self.my.getTop()  # 640
         self.myBottom = self.my.getBottom()
+        self.myFront = self.my.isFront()
         self.mySpeedX = self.my.getSpeedX()  # 15
         self.mySpeedY = self.my.getSpeedY()  # 28
         self.myAction = self.my.getAction()
+        self.myAttack = self.my.getAttack()
         self.myState = self.my.getState()
         self.myRemainingFrame = self.my.getRemainingFrame()  # 70
 
@@ -138,9 +171,11 @@ class StylizedAI(object):
         self.oppRight = self.opp.getRight()  # 960
         self.oppTop = self.opp.getTop()  # 640
         self.oppBottom = self.opp.getBottom()  # 640
+        self.oppFront = self.opp.isFront()
         self.oppSpeedX = self.opp.getSpeedX()  # 15
         self.oppSpeedY = self.opp.getSpeedY()  # 28
         self.oppAction = self.opp.getAction()
+        self.oppAttack = self.opp.getAttack()
         self.oppState = self.opp.getState()
         self.oppRemainingFrame = self.opp.getRemainingFrame()  # 70
 
@@ -171,13 +206,12 @@ class StylizedAI(object):
 
 
         # Following is the brain of the reflex agent. It determines distance to the enemy and the energy of our agent and then it performs an action
-        if self.ImDown() and self.canHallWall(not self.player,50):
+        if self.is_down() and self.can_hall_wall(not self.player,50):
+            pass
 
 
-        if (opp.getEnergy() >= 300) and (my.getHp() - opp.getHp() <= 300):
-            # If the opp has 300 of energy, it is dangerous, so better jump!!
-            # If the health difference is high we are dominating so we are fearless :)
-            self.cc.commandCall("FOR_JUMP _B B B")
+
+
         elif not my_state.equals(self.gateway.jvm.enumerate.State.AIR) and not my_state.equals(
                 self.gateway.jvm.enumerate.State.DOWN):
             # If not in air
