@@ -1,18 +1,18 @@
-import numpy as np
-import pickle
 import random
-import os
-from collections import OrderedDict
-
-
+import logging
+# logging.basicConfig(level=logging.DEBUG)
 class StylizedAI(object):
-    def __init__(self, gateway, frameskip=True,agent_type=0):
+    def __init__(self, gateway, frameskip=True, agent_type=0):
+        # Agent type: 1 = Aggressive, 2 = mixing, 3 = defensive
         self.gateway = gateway
         self.obs = None
         self.just_inited = True
         self._actions = "AIR AIR_A AIR_B AIR_D_DB_BA AIR_D_DB_BB AIR_D_DF_FA AIR_D_DF_FB AIR_DA AIR_DB AIR_F_D_DFA AIR_F_D_DFB AIR_FA AIR_FB AIR_GUARD AIR_GUARD_RECOV AIR_RECOV AIR_UA AIR_UB BACK_JUMP BACK_STEP CHANGE_DOWN CROUCH CROUCH_A CROUCH_B CROUCH_FA CROUCH_FB CROUCH_GUARD CROUCH_GUARD_RECOV CROUCH_RECOV DASH DOWN FOR_JUMP FORWARD_WALK JUMP LANDING NEUTRAL RISE STAND STAND_A STAND_B STAND_D_DB_BA STAND_D_DB_BB STAND_D_DF_FA STAND_D_DF_FB STAND_D_DF_FC STAND_F_D_DFA STAND_F_D_DFB STAND_FA STAND_FB STAND_GUARD STAND_GUARD_RECOV STAND_RECOV THROW_A THROW_B THROW_HIT THROW_SUFFER"
         self._action_air = "AIR_GUARD AIR_A AIR_B AIR_DA AIR_DB AIR_FA AIR_FB AIR_UA AIR_UB AIR_D_DF_FA AIR_D_DF_FB AIR_F_D_DFA AIR_F_D_DFB AIR_D_DB_BA AIR_D_DB_BB"
         self._action_ground = "STAND_D_DB_BA BACK_STEP FORWARD_WALK DASH JUMP FOR_JUMP BACK_JUMP STAND_GUARD CROUCH_GUARD THROW_A THROW_B STAND_A STAND_B CROUCH_A CROUCH_B STAND_FA STAND_FB CROUCH_FA CROUCH_FB STAND_D_DF_FA STAND_D_DF_FB STAND_F_D_DFA STAND_F_D_DFB STAND_D_DB_BB"
+        self._action_attack = "AIR_A AIR_B AIR_D_DB_BA AIR_D_DB_BB AIR_D_DF_FA AIR_D_DF_FB AIR_DA AIR_DB AIR_F_D_DFA AIR_F_D_DFB AIR_FA AIR_FB AIR_UA AIR_UB CROUCH_A CROUCH_B CROUCH_FA CROUCH_FB STAND_A STAND_B STAND_D_DB_BA STAND_D_DB_BB STAND_D_DF_FA STAND_D_DF_FB STAND_D_DF_FC STAND_F_D_DFA STAND_F_D_DFB STAND_FA STAND_FB THROW_A THROW_B"
+        self._action_down_recover = "STAND_GUARD_RECOV CROUCH_GUARD_RECOV AIR_GUARD_RECOV STAND_RECOV CROUCH_RECOV AIR_RECOV CHANGE_DOWN DOWN RISE LANDING THROW_HIT THROW_SUFFER"
+        self._action_defence = "AIR_GUARD STAND_GUARD CROUCH_GUARD"
         self._valid_action = self._action_air + " " + self._action_ground
         self.action_strs = self._actions.split(" ")
         self.agent_type_strs = ["Aggressive", "Mixing", "Defensive"] # First create three type, later extend to 5
@@ -28,6 +28,7 @@ class StylizedAI(object):
         self.cc = self.gateway.jvm.aiinterface.CommandCenter()
         self.player = player
         self.gameData = gameData
+        self.simulator = self.gameData.getSimulator()
         self.my_motion = self.gameData.getMotionData(self.player)
         self.opp_motion = self.gameData.getMotionData(not self.player)
         self.isGameJustStarted = True
@@ -48,6 +49,14 @@ class StylizedAI(object):
 
     def getInformation(self, frameData, isControl):
         self.frameData = frameData
+        self.myLastAction = None
+        if frameData.getFramesNumber() >= 0 :
+            self.my = self.frameData.getCharacter(self.player)
+            self.myLastAction = self.my.getAction()
+            self.opp = self.frameData.getCharacter(not self.player)
+            self.oppLastAttack = self.opp.getAttack()
+        if frameData.getFramesNumber() > 14:
+            self.frameData = self.simulator.simulate(frameData, self.player, None, None, 14)
         self.isControl = isControl
         self.cc.setFrameData(self.frameData, self.player)
         if frameData.getEmptyFlag():
@@ -59,74 +68,6 @@ class StylizedAI(object):
     def gameEnd(self):
         pass
 
-    # the following functions are used to Judge the current situation
-    def at_advantage(self):
-        return self.myHp > self.oppHp
-
-    def opp_attack_before_active(self,action):
-        pass
-
-    # TODO: implement this function later to replace the simple distance judgement in battle
-    def is_in_hit_area(self, action):
-        pass
-
-    # TODO: implement this function later to replayce the simple energy judgement in battle
-    def is_enough_energy(self, action):
-        pass
-
-    def is_down(self):
-        if self.myAction.equals(self.gateway.jvm.enumerate.Action.DOWN) \
-                or self.myAction.equals(self.gateway.jvm.enumerate.Action.RISE) \
-                or self.myAction.equals(self.gateway.jvm.enumerate.Action.CHANGE_DOWN):
-            return True
-        else:
-            return False
-
-    def can_hall_wall(self, player_number, threshold):
-        (my, opp) = (self.my, self.opp) if player_number else (my, opp) = (self.opp, self.my)
-        if my.getRight() < opp.getRight() and self.gameData.getStageWidth() - opp.getRight() < threshold: return True
-        if opp.getLeft() < my.getLeft() and opp.getLeft() < threshold: return True
-        return False
-
-    # the following functions are used to perform the actions
-    # Defence response when opp perform attack before attack active frame
-    def defence(self):
-        if self.myState.equals(self.gateway.jvm.enumerate.State.AIR):
-            return "AIR_GUARD"
-        if self.oppAction.getAttackType() == 1 or self.oppAction.getAttackType() == 2:
-            return "STAND_GUARD"
-        elif self.oppAction.getAttackType() == 3:
-            return "CROUCH_GUARD"
-
-    # dodge response when opp perform attack before attack active frame
-    def dodge(self):
-        if self.myState.equals(self.gateway.jvm.enumerate.State.AIR):
-            return "AIR_GUARD"
-        if (self.myLeft>=150 and self.myFront) or (self.gameData.getStageWidth() - self.myRight >=150 and not self.myFront):
-            if self.oppState.equal(self.gateway.jvm.enumerate.State.AIR):
-                return "BACK_STEP"
-            else:
-                return "BACK_JUMP"
-        # Already including the attach when opp in air (attacktype == 2), need to test
-        if self.oppAction.getAttackType() == 1 or self.oppAction.getAttackType() == 2:
-            return "CROUCH"
-        elif self.oppAction.getAttackType() == 3:
-            return "JUMP"
-
-    # Active attack behavior when opp is not using attack or after the opp attack active frame
-    def active_attack(self):
-        pass
-
-
-    # Distance control by moving actions
-    def move_closer(self):
-            return random.choice(["FOR_JUMP","FORWARD_WALK","DASH"])
-
-    def move_far(self):
-            return random.choice(["BACK_JUMP","BACK_STEP"])
-
-    def neutral(self):
-        return "NEUTRAL"
 
     def processing(self):
         if self.frameData.getEmptyFlag() or self.frameData.getRemainingTime() <= 0:
@@ -142,8 +83,20 @@ class StylizedAI(object):
 
             self.inputKey.empty()
             self.cc.skillCancel()
+        self.get_obs()
+        action = self.act()
+        if str(action) == "CROUCH_GUARD":
+            action = "1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1"
+        elif str(action) == "STAND_GUARD":
+            action = "4 4 4 4 4 4 4 4 4 4 4 4 4 4 4 4 4 4 4 4 4 4 4 4 4 4 4 4 4 4 4 4 4 4 4 4 4 4 4 4 4 4 4 4 4 4 4 4 4"
+        elif str(action) == "AIR_GUARD":
+            action = "7 7 7 7 7 7 7 7 7 7 7 7 7 7 7 7 7 7 7 7 7 7 7 7 7 7 7 7 7 7 7 7 7 7 7 7 7 7 7 7 7 7 7 7 7 7 7 7 7"
+        self.cc.commandCall(action)
+        print("Stylized AI {} perform ACTION: {}".format(self.agent_type, action))
 
-        distance = self.frameData.getDistanceX()
+
+    def get_obs(self):
+        self.distance = self.frameData.getDistanceX()
         self.my = self.frameData.getCharacter(self.player)
         self.opp = self.frameData.getCharacter(not self.player)
         self.myProjectiles = self.frameData.getProjectilesByP1() if self.player else self.frameData.getProjectilesByP2()
@@ -204,49 +157,200 @@ class StylizedAI(object):
         self.oppHitAreaNowTop1 = self.oppProjectiles[1].getCurrentHitArea().getTop() if len(self.oppProjectiles) >= 2 else None  # 640.0
         self.oppHitAreaNowBottom1 = self.oppProjectiles[1].getCurrentHitArea().getBottom() if len(self.oppProjectiles) >= 2 else None  # 640.0
 
-
-        # Following is the brain of the reflex agent. It determines distance to the enemy and the energy of our agent and then it performs an action
-        if self.is_down() and self.can_hall_wall(not self.player,50):
-            pass
-
-
-
-
-        elif not my_state.equals(self.gateway.jvm.enumerate.State.AIR) and not my_state.equals(
-                self.gateway.jvm.enumerate.State.DOWN):
-            # If not in air
-            if distance > 150:
-                # If its too far, then jump to get closer fast
-                self.cc.commandCall("FOR_JUMP")
-            elif energy >= 300:
-                # High energy projectile
-                self.cc.commandCall("STAND_D_DF_FC")
-            elif (distance > 100) and (energy >= 50):
-                # Perform a slide kick
-                self.cc.commandCall("STAND_D_DB_BB")
-            elif opp_state.equals(self.gateway.jvm.enumerate.State.AIR):  # If enemy on Air
-                # Perform a big punch
-                self.cc.commandCall("STAND_F_D_DFA")
-            elif distance > 100:
-                # Perform a quick dash to get closer
-                self.cc.commandCall("6 6 6")
-            else:
-                # Perform a kick in all other cases, introduces randomness
-                self.cc.commandCall("B")
-        elif ((distance <= 150) and (my_state.equals(self.gateway.jvm.enumerate.State.AIR) or my_state.equals(
-                self.gateway.jvm.enumerate.State.DOWN)) and (
-                      ((self.gameData.getStageWidth() - my_x) >= 200) or (xDifference > 0)) and (
-                      (my_x >= 200) or xDifference < 0)):
-            # Conditions to handle game corners
-            if energy >= 5:
-                # Perform air down kick when in air
-                self.cc.commandCall("AIR_DB")
-            else:
-                # Perform a kick in all other cases, introduces randomness
-                self.cc.commandCall("B")
+    def act(self):
+        # TODO: need to figure out the proper distance to make sure most of the attack could take effect, \
+        # later need to use the precise judgement
+        if self.is_down() and self.can_hall_wall(250):
+            return self.defence()
+        elif self.distance <= 200:
+            return self.battle_policy()
         else:
-            # Perform a kick in all other cases, introduces randomness
-            self.cc.commandCall("B")
+            return self.moving_policy()
+
+    def moving_policy(self):
+        # 1 = moving closer, 2 = neural, 3 = moving far
+        # TODO need to add the stage edge judgement
+
+        if 200 <= self.distance <= 400:
+            if self.agent_type == 1:
+                return self.move_closer()
+            elif self.agent_type == 3:
+                return self.move_far()
+            elif self.agent_type == 2:
+                if self.at_advantage():
+                    return self.neutral()
+                else:
+                    return self.move_closer()
+            else:
+                raise Exception("No such agent type")
+
+        elif self.distance >= 400:
+            if self.agent_type == 1:
+                return self.move_closer()
+            elif self.agent_type == 3:
+                return self.neutral()
+            elif self.agent_type == 2:
+                if self.at_advantage():
+                    return self.neutral()
+                else:
+                    return self.move_closer()
+            else:
+                raise Exception("No such agent type")
+        else:
+            raise Exception("The distance is illegal")
+
+    def battle_policy(self):
+        # when opp attack first
+        if str(self.oppAction) in self._action_attack.split(" "):
+            if self.agent_type == 1:
+                return self.counter_attack()
+            elif self.agent_type == 3:
+                action = self.dodge()
+                return action if action else self.defence()
+            elif self.agent_type == 2:
+                if self.at_advantage():
+                    action = self.dodge()
+                    return action if action else self.counter_attack()
+                else:
+                    return self.counter_attack()
+            else:
+                return self.neutral()
+        # when opp is not attacking
+        else:
+            if self.agent_type == 1:
+                return self.active_attack()
+            elif self.agent_type == 3:
+                action = self.dodge()
+                return action if action else self.active_attack()
+            elif self.agent_type == 2:
+                if self.at_advantage():
+                    action = self.dodge()
+                    return action if action else self.active_attack()
+                else:
+                    return self.active_attack()
+            else:
+                return self.neutral()
+
+    # the following functions are used to Judge the current situation
+    def at_advantage(self):
+        return self.myHp > self.oppHp
+
+    def opp_attack_before_active(self, action):
+        pass
+
+    # TODO: implement this function later to replace the simple distance judgement in battle
+    def is_in_hit_area(self, action):
+        pass
+
+    # TODO: implement this function later to replayce the simple energy judgement in battle
+    def is_enough_energy(self, action):
+        pass
+
+    def is_down(self):
+        print("is_down function")
+        return str(self.myLastAction) == "DOWN" or str(self.myLastAction) == "RISE" or str(self.myLastAction) == "CHANGE_DOWN"
+
+    def can_hall_wall(self, threshold):
+        print("can_hall_wall function")
+        if self.oppLeft > self.myLeft and self.oppLeft < threshold: return True
+        if self.oppRight < self.myRight and self.gameData.getStageWidth() - self.oppRight < threshold: return True
+        return False
+
+    # the following functions are used to perform the actions
+    # dodge response when opp perform attack before attack active frame.
+    def dodge(self):
+        print("dodge function")
+        if (self.myLeft >= 150 and self.myFront) or (self.gameData.getStageWidth() - self.myRight >= 150 and not self.myFront):
+            if str(self.oppState) == "AIR":
+                return "BACK_STEP"
+            else:
+                return "BACK_JUMP"
+        else:
+            return None
+
+    # defence response when opp perform attack before attack active frame.
+    def defence(self):
+        print("defence function")
+        if str(self.myState) == "AIR":
+            return "AIR_GUARD"
+        elif self.oppLastAttack.getAttackType() == 1 or self.oppLastAttack.getAttackType() == 2:
+            return "STAND_GUARD"
+        elif self.oppLastAttack.getAttackType() == 3:
+            return "CROUCH_GUARD"
+        else:
+            print("Did not catch the condition, return default Defence Action")
+            return "CROUCH_GUARD"
+
+    # counter attack behavior when opp is using attack or r the opp attack active frame
+    # TODO add later, use active_attack first
+    def counter_attack(self):
+        print("counter attack function")
+        return self.active_attack()
+
+    # Active attack behavior when opp is not using attack or after the opp attack active frame
+    def active_attack(self):
+        print("active attack function")
+        if (str(self.myState) == "STAND" or str(self.myState) == "CROUCH") and (str(self.oppState) == "STAND" or str(self.oppState) == "CROUCH"):
+            print("active attack:STAND CROUCH")
+            if self.myEnergy >= 50:
+                return "STAND_D_DB_BB"
+            elif str(self.oppAction) != "CROUCH_GUARD":
+                return "CROUCH_FB"
+            else:
+                return random.choice(["STAND_A", "STAND_B", "STAND_FA", "STAND_FB","CROUCH_A","CROUCH_B","CROUCH_FA","CROUCH_FB"])
+
+        elif (str(self.myState) == "STAND" or str(self.myState) == "CROUCH") and (str(self.oppState) == "DOWN"):
+            print("active attack:STAND DOWN")
+            if self.myEnergy >= 200:
+                return "STAND_D_DF_FC"
+            else:
+                return "CROUCH_FB"
+
+        elif (str(self.myState) == "STAND" or str(self.myState) == "CROUCH") and str(self.oppState) == "AIR":
+            print("active attack:STAND AIR")
+            if (int(self.oppFront)* self.oppSpeedX) > 0:
+            # L Dragon Fist!
+                if self.myEnergy >= 100:
+                    return "STAND_F_D_DFB"
+                else:
+                    return random.choice(["STAND_FB", "CROUCH_FA"])
+            else:
+                return self.neutral()
+
+        elif str(self.myState) == "AIR" and (str(self.oppState) == "STAND" or str(self.oppState) == "CROUCH"):
+            print("active attack:AIR STAND")
+            return random.choice(["AIR_DA", "AIR_DB"])
+
+        elif str(self.myState) == "AIR" and str(self.oppState) == "AIR":
+            print("active attack:AIR AIR")
+            if (self.myTop+self.myBottom)/2 < (self.oppTop + self.oppBottom) / 2:
+                return random.choice(["AIR_UB", "AIR_UA"])
+            elif (self.myTop + self.myBottom) / 2 > (self.oppTop + self.oppBottom) / 2:
+                return random.choice(["AIR_DB", "AIR_DA"])
+            elif (self.myTop + self.myBottom) / 2 == (self.oppTop + self.oppBottom) / 2:
+                return random.choice(["AIR_B", "AIR_A", "AIR_FA", "AIR_FB"])
+            else:
+                return self.neutral()
+        else:
+            print("Can not process by rule, return neural")
+            return self.neutral()
+
+    # Distance control by moving actions
+    def move_closer(self):
+        print("Moving closer")
+        return random.choice(["FOR_JUMP", "FORWARD_WALK", "DASH"])
+
+    def move_far(self):
+        print("Moving far")
+        return random.choice(["BACK_JUMP", "BACK_STEP"])
+
+    def neutral(self):
+        print("neutral function")
+        return "NEUTRAL"
+
+    def get_agent_type(self):
+        print(self.agent_type_strs[self.agent_type - 1])
+        return self.agent_type
 
     # This part is mandatory
     class Java:
