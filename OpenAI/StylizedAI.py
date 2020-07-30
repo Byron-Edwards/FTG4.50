@@ -1,16 +1,20 @@
 import random
+import python.action as pyactions
+from OpenAI.Calculator import Calculator
 import logging
 # logging.basicConfig(level=logging.DEBUG)
 class StylizedAI(object):
     def __init__(self, gateway, frameskip=True, agent_type=0):
         # Agent type: 1 = Aggressive, 2 = mixing, 3 = defensive
         self.gateway = gateway
+        self.java_actions = self.gateway.jvm.enumerate.Action
         self.obs = None
         self.just_inited = True
         self._actions = "AIR AIR_A AIR_B AIR_D_DB_BA AIR_D_DB_BB AIR_D_DF_FA AIR_D_DF_FB AIR_DA AIR_DB AIR_F_D_DFA AIR_F_D_DFB AIR_FA AIR_FB AIR_GUARD AIR_GUARD_RECOV AIR_RECOV AIR_UA AIR_UB BACK_JUMP BACK_STEP CHANGE_DOWN CROUCH CROUCH_A CROUCH_B CROUCH_FA CROUCH_FB CROUCH_GUARD CROUCH_GUARD_RECOV CROUCH_RECOV DASH DOWN FOR_JUMP FORWARD_WALK JUMP LANDING NEUTRAL RISE STAND STAND_A STAND_B STAND_D_DB_BA STAND_D_DB_BB STAND_D_DF_FA STAND_D_DF_FB STAND_D_DF_FC STAND_F_D_DFA STAND_F_D_DFB STAND_FA STAND_FB STAND_GUARD STAND_GUARD_RECOV STAND_RECOV THROW_A THROW_B THROW_HIT THROW_SUFFER"
         self._action_air = "AIR_GUARD AIR_A AIR_B AIR_DA AIR_DB AIR_FA AIR_FB AIR_UA AIR_UB AIR_D_DF_FA AIR_D_DF_FB AIR_F_D_DFA AIR_F_D_DFB AIR_D_DB_BA AIR_D_DB_BB"
         self._action_ground = "STAND_D_DB_BA BACK_STEP FORWARD_WALK DASH JUMP FOR_JUMP BACK_JUMP STAND_GUARD CROUCH_GUARD THROW_A THROW_B STAND_A STAND_B CROUCH_A CROUCH_B STAND_FA STAND_FB CROUCH_FA CROUCH_FB STAND_D_DF_FA STAND_D_DF_FB STAND_F_D_DFA STAND_F_D_DFB STAND_D_DB_BB"
-        self._action_attack = "AIR_A AIR_B AIR_D_DB_BA AIR_D_DB_BB AIR_D_DF_FA AIR_D_DF_FB AIR_DA AIR_DB AIR_F_D_DFA AIR_F_D_DFB AIR_FA AIR_FB AIR_UA AIR_UB CROUCH_A CROUCH_B CROUCH_FA CROUCH_FB STAND_A STAND_B STAND_D_DB_BA STAND_D_DB_BB STAND_D_DF_FA STAND_D_DF_FB STAND_D_DF_FC STAND_F_D_DFA STAND_F_D_DFB STAND_FA STAND_FB THROW_A THROW_B"
+        # self._action_attack = "AIR_A AIR_B AIR_D_DB_BA AIR_D_DB_BB AIR_D_DF_FA AIR_D_DF_FB AIR_DA AIR_DB AIR_F_D_DFA AIR_F_D_DFB AIR_FA AIR_FB AIR_UA AIR_UB CROUCH_A CROUCH_B CROUCH_FA CROUCH_FB STAND_A STAND_B STAND_D_DB_BA STAND_D_DB_BB STAND_D_DF_FA STAND_D_DF_FB STAND_D_DF_FC STAND_F_D_DFA STAND_F_D_DFB STAND_FA STAND_FB THROW_A THROW_B"
+        self._action_attack = "AIR_A AIR_B  AIR_DA AIR_DB AIR_FA AIR_FB AIR_UA AIR_UB CROUCH_A CROUCH_B CROUCH_FA CROUCH_FB STAND_A STAND_B STAND_D_DB_BA STAND_D_DB_BB STAND_D_DF_FC STAND_F_D_DFA STAND_F_D_DFB STAND_FA STAND_FB THROW_A THROW_B"
         self._action_down_recover = "STAND_GUARD_RECOV CROUCH_GUARD_RECOV AIR_GUARD_RECOV STAND_RECOV CROUCH_RECOV AIR_RECOV CHANGE_DOWN DOWN RISE LANDING THROW_HIT THROW_SUFFER"
         self._action_defence = "AIR_GUARD STAND_GUARD CROUCH_GUARD"
         self._valid_action = self._action_air + " " + self._action_ground
@@ -18,6 +22,13 @@ class StylizedAI(object):
         self.agent_type_strs = ["Aggressive", "Mixing", "Defensive"] # First create three type, later extend to 5
         self.agent_type = agent_type
         self.frameskip = frameskip
+
+    def agent_type_random(self):
+        new_type = random.randint(1,3)
+        self.agent_type_swith(new_type)
+
+    def agent_type_swith(self, target_type):
+        self.agent_type = target_type
 
     def close(self):
         pass
@@ -80,6 +91,7 @@ class StylizedAI(object):
 
             self.inputKey.empty()
             self.cc.skillCancel()
+        # self.calc = Calculator(self.frameData, self.gameData, self.player, Calculator.NONACT)
         self.get_obs()
         action = self.act()
         if str(action) == "CROUCH_GUARD":
@@ -351,10 +363,12 @@ class StylizedAI(object):
             print("Can not process by rule, return neural")
             return self.neutral()
 
+
+
     # Distance control by moving actions
     def move_closer(self):
         print("Moving closer")
-        return random.choice(["FOR_JUMP", "FORWARD_WALK", "DASH"])
+        return random.choice(["FORWARD_WALK", "DASH"])
 
     def move_far(self):
         print("Moving far")
@@ -371,15 +385,22 @@ class StylizedAI(object):
     def isEnoughEnergy(self, act, player):
         ch = self.frameData.getCharacter(player)
         motion = self.my_motion if player else self.opp_motion
-        return motion.get(act.ordinal()).getAttackStartAddEnergy() + ch.getEnergy() >= 0
+        return motion.get(pyactions.Action.to_ordinal(act)).getAttackStartAddEnergy() + ch.getEnergy() >= 0
+
+    def getEnoughEnergyActions(self, player, acts):
+        moveActs = list()
+        for tac in acts:
+            if self.isEnoughEnergy(tac, player):
+                moveActs.append(tac)
+        return moveActs
 
     def IsInHitArea(self, ac):
         mych = self.frameData.getCharacter(self.player)
         opch = self.frameData.getCharacter(not self.player)
         if not self.isEnoughEnergy(ac, self.player):
             return False
-        mo = self.my_motion.get(ac.ordinal())
-        hi = mo.attackHitArea
+        mo = self.my_motion.get(pyactions.Action.to_ordinal(ac))
+        hi = mo.getAttackHitArea()
 
         top = mych.getY() + hi.getTop()
         bottom = mych.getY() + hi.getBottom()
@@ -387,13 +408,13 @@ class StylizedAI(object):
         top += mo.getAttackStartUp() * mo.getSpeedY()
 
         if mo.getAttackSpeedY() > 0:
-            bottom += mo.attackActive * mo.getAttackSpeedY()
+            bottom += mo.getAttackActive() * mo.getAttackSpeedY()
         else:
-            top += mo.attackActive * mo.getAttackSpeedY()
+            top += mo.getAttackActive() * mo.getAttackSpeedY()
         if mo.getSpeedY() > 0:
-            bottom += mo.attackActive * mo.getSpeedY()
+            bottom += mo.getAttackActive() * mo.getSpeedY()
         else:
-            top += mo.attackActive * mo.getSpeedY()
+            top += mo.getAttackActive() * mo.getSpeedY()
 
         frontfugou = 1
         if mych.isFront():
@@ -408,14 +429,14 @@ class StylizedAI(object):
         right += mo.getAttackStartUp() * mo.getSpeedX() * frontfugou
 
         if mo.getAttackSpeedX() * frontfugou > 0:
-            right += mo.attackActive * mo.getAttackSpeedX() * frontfugou
+            right += mo.getAttackActive() * mo.getAttackSpeedX() * frontfugou
         else:
-            left += mo.attackActive * mo.getAttackSpeedX() * frontfugou
+            left += mo.getAttackActive() * mo.getAttackSpeedX() * frontfugou
 
         if mo.getSpeedX() * frontfugou > 0:
-            right += mo.attackActive * mo.getSpeedX() * frontfugou
+            right += mo.getAttackActive() * mo.getSpeedX() * frontfugou
         else:
-            left += mo.attackActive * mo.getSpeedX() * frontfugou
+            left += mo.getAttackActive() * mo.getSpeedX() * frontfugou
 
         oright = opch.getRight()
         oleft = opch.getLeft()
@@ -430,8 +451,122 @@ class StylizedAI(object):
             return False
         if obottom < top:
             return False
-
         return True
+
+    def get_hittable_actions(self, actions, sort_by="energy"):
+        actions = self.getEnoughEnergyActions(self.player, actions)
+        actions = [action for action in actions if self.IsInHitArea(action)]
+        # if sort_by == "energy":
+        #     actions = sorted(actions, key=lambda action: self.my_motion.get(pyactions.Action.to_ordinal(action)).getAttackStartAddEnergy())
+        # else:
+        #     actions = sorted(actions, key=lambda action: self.my_motion.get(pyactions.Action.to_ordinal(action)).getAttackHitDamage(),reverse=True)
+        return actions[0] if actions else self.neutral()
+
+    # python version of ReiwaThunder ZEN Standard,
+    def act2(self):
+        # TODO: need to test
+        # later need to use the precise judgement
+        if self.is_down() and self.can_hall_wall(250):
+            return self.defence()
+        if str(self.myState != "AIR"):
+            moveActs=self.calc.getEnoughEnergyActions(False,"NEUTRAL")
+            if self.calc.canHitFromNow("STAND_D_DF_FC", self.player):
+                if 100 <= self.distance < 230:
+                    return "STAND_D_DF_FC"
+                if self.calc.getMinHpScore("STAND_B", moveActs) > 0:
+                    return "STAND_B"
+                if self.calc.canHameWall(self.player, 50) and self.calc.getMinHpScore("CROUCH_FB", moveActs) > 0:
+                    return "CROUCH_FB"
+
+        if self.distance<300:
+            movingActions = self.calc.getEnoughEnergyActions(self.player,["FOR_JUMP","FORWARD_WALK","NEUTRAL","JUMP"])
+        else:
+            movingActions = self.calc.getEnoughEnergyActions(self.player,["FORWARD_WALK", "FOR_JUMP", "NEUTRAL", "JUMP"])
+        if self.calc.canHameWall(not self.player,50):
+            nigeActions = self.calc.getEnoughEnergyActions(self.player,
+                                                             ["NEUTRAL", "FOR_JUMP", "FORWARD_WALK", "NEUTRAL","BACK_STEP","JUMP","BACK_JUMP"])
+        elif self.distance<300:
+            nigeActions = self.calc.getEnoughEnergyActions(self.player,
+                                                           ["BACK_STEP", "NEUTRAL", "JUMP", "FOR_JUMP","FORWARD_WALK", "BACK_JUMP"])
+        elif self.distance<600:
+            nigeActions = self.calc.getEnoughEnergyActions(self.player,
+                                                           ["NEUTRAL", "BACK_STEP", "JUMP", "FOR_JUMP","FORWARD_WALK", "BACK_JUMP"])
+        else:
+            nigeActions = self.calc.getEnoughEnergyActions(self.player,
+                                                           ["FORWARD_WALK", "NEUTRAL", "BACK_STEP", "FOR_JUMP", "JUMP","BACK_JUMP"])
+
+        HittingMyActions = []
+        bestscore = -9999;
+        bestac = None
+        myacs = self._action_air.split() if str(self.myState)=="AIR" else self._action_ground.split()
+        for ac in myacs:
+            hpscore=self.calc.getHpScore(ac)
+            mo=self.my_motion.get(pyactions.Action.to_ordinal(ac))
+            if (hpscore > 0):
+                HittingMyActions.append(ac)
+                turnscore= hpscore + 30 if mo.isAttackDownProp() else 0 - mo.getAttackStartUp() * 0.01 - mo. getCancelAbleFrame() * 0.0001
+                if turnscore > bestscore:
+                    bestscore=turnscore
+                    bestac=ac
+
+        HittingOpActions = []
+        opacs = self._action_air.split() if str(self.oppState) == "AIR" else self._action_ground.split()
+        for ac in opacs:
+            hpscore=self.calc.getHpScore("NEUTRAL", ac)
+            mo=self.my_motion.get(pyactions.Action.to_ordinal(ac))
+            if (hpscore < 0):
+                HittingOpActions.append(ac)
+        HittingOpActions.append("NEUTRAL")
+
+        if not HittingMyActions:
+            return self.calc.getMinMaxHp(HittingMyActions, HittingOpActions)
+        elif not self.at_advantage():
+            return self.calc.getMinMaxHp(movingActions, HittingOpActions)
+        else:
+            return self.calc.getMinMaxHp(nigeActions, HittingOpActions)
+
+    def getJavaAction(self, action):
+        for Jaction in self.java_actions:
+            if str(action) == Jaction.name():
+                return Jaction
+
+    # Active attack behavior when opp is not using attack or after the opp attack active frame
+    # TODO need to test
+    def active_attack2(self):
+        print("active attack function")
+        if (str(self.myState) == "STAND" or str(self.myState) == "CROUCH") and (str(self.oppState) == "STAND" or str(self.oppState) == "CROUCH"):
+            print("active attack:STAND CROUCH")
+
+            if self.oppLastAttack.getAttackType() == 1 or self.oppLastAttack.getAttackType() == 2:
+                actions = ["STAND_D_DB_BB", "CROUCH_FB", ]
+            elif self.oppLastAttack.getAttackType() == 3:
+                actions = ["JUMP"]
+            else:
+                actions = ["STAND_FB","STAND_D_DB_BB","CROUCH_FB","STAND_A", "STAND_B", "STAND_FA", "STAND_FB","CROUCH_A","CROUCH_B","CROUCH_FA"]
+            return self.get_hittable_actions(actions)
+
+        elif (str(self.myState) == "STAND" or str(self.myState) == "CROUCH") and (str(self.oppState) == "DOWN"):
+            print("active attack:STAND DOWN")
+            actions =["STAND_D_DF_FC","CROUCH_FB"]
+            return self.get_hittable_actions(actions)
+
+        elif (str(self.myState) == "STAND" or str(self.myState) == "CROUCH") and str(self.oppState) == "AIR":
+            print("active attack:STAND AIR")
+            actions = ["STAND_FB","STAND_F_D_DFB","STAND_F_D_DFA", "CROUCH_FA"]
+            return self.get_hittable_actions(actions)
+
+        elif str(self.myState) == "AIR" and (str(self.oppState) == "STAND" or str(self.oppState) == "CROUCH"):
+            print("active attack:AIR STAND")
+            actions = ["AIR_DA", "AIR_DB"]
+            return self.get_hittable_actions(actions)
+
+        elif str(self.myState) == "AIR" and str(self.oppState) == "AIR":
+            print("active attack:AIR AIR")
+            actions = ["AIR_FB", "AIR_FA","AIR_UB", "AIR_UA", "AIR_DB", "AIR_DA", "AIR_B", "AIR_A", ]
+            return self.get_hittable_actions(actions)
+        else:
+            print("Can not be processed by any rule, return neural")
+            return self.neutral()
 
 
     # This part is mandatory
