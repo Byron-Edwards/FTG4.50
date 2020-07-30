@@ -3,6 +3,8 @@ from time import sleep
 from py4j.java_gateway import JavaGateway, GatewayParameters, CallbackServerParameters, get_field
 from OpenAI.ByronAI import ByronAI
 from OpenAI.StylizedAI import StylizedAI
+
+# java -cp FightingICE.jar:./lib/lwjgl/*:./lib/natives/linux/*:./lib/*  Main  --mute --grey-bg --limithp 400 400 --py4j --fastmode
 def check_args(args):
 	for i in range(argc):
 		if args[i] == "-n" or args[i] == "--n" or args[i] == "--number":
@@ -13,7 +15,7 @@ def start_game():
 	manager.registerAI(StylizedAI.__class__.__name__, StylizedAI(gateway=gateway,agent_type=1))
 	print("Start game")
 	
-	game = manager.createGame("ZEN", "ZEN", ByronAI.__class__.__name__, "Toothless", GAME_NUM)
+	game = manager.createGame("ZEN", "ZEN", StylizedAI.__class__.__name__, "Toothless", GAME_NUM)
 	manager.runGame(game)
 	
 	print("After game")

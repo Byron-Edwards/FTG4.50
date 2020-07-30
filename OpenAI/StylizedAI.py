@@ -49,12 +49,9 @@ class StylizedAI(object):
 
     def getInformation(self, frameData, isControl):
         self.frameData = frameData
-        self.myLastAction = None
         if frameData.getFramesNumber() >= 0 :
-            self.my = self.frameData.getCharacter(self.player)
-            self.myLastAction = self.my.getAction()
-            self.opp = self.frameData.getCharacter(not self.player)
-            self.oppLastAttack = self.opp.getAttack()
+            self.myLastAction = self.frameData.getCharacter(self.player).getAction()
+            self.oppLastAttack = self.opp_motion.get(self.frameData.getCharacter(not self.player).getAction().ordinal())
         if frameData.getFramesNumber() > 14:
             self.frameData = self.simulator.simulate(frameData, self.player, None, None, 14)
         self.isControl = isControl
@@ -162,7 +159,7 @@ class StylizedAI(object):
         # later need to use the precise judgement
         if self.is_down() and self.can_hall_wall(250):
             return self.defence()
-        elif self.distance <= 200:
+        elif self.distance < 200:
             return self.battle_policy()
         else:
             return self.moving_policy()
@@ -175,7 +172,7 @@ class StylizedAI(object):
             if self.agent_type == 1:
                 return self.move_closer()
             elif self.agent_type == 3:
-                return self.move_far()
+                return self.move_far() if self.at_edge(50) else self.neutral()
             elif self.agent_type == 2:
                 if self.at_advantage():
                     return self.neutral()
@@ -256,6 +253,13 @@ class StylizedAI(object):
         if self.oppRight < self.myRight and self.gameData.getStageWidth() - self.oppRight < threshold: return True
         return False
 
+    def at_edge(self, threshold):
+        if self.myLeft <= threshold or self.gameData.getStageWidth() - self.myRight <= threshold:
+            return True
+        else:
+            return False
+
+
     # the following functions are used to perform the actions
     # dodge response when opp perform attack before attack active frame.
     def dodge(self):
@@ -292,12 +296,21 @@ class StylizedAI(object):
         print("active attack function")
         if (str(self.myState) == "STAND" or str(self.myState) == "CROUCH") and (str(self.oppState) == "STAND" or str(self.oppState) == "CROUCH"):
             print("active attack:STAND CROUCH")
-            if self.myEnergy >= 50:
-                return "STAND_D_DB_BB"
+            if self.oppLastAttack.getAttackType() == 1 or self.oppLastAttack.getAttackType() == 2:
+                if self.myEnergy >= 50:
+                    return "STAND_D_DB_BB"
+                else:
+                    return "CROUCH_FB"
+            elif self.oppLastAttack.getAttackType() == 3:
+                return "JUMP"
+            if self.distance >= 175:
+                return "STAND_FB"
+            elif self.myEnergy >= 50:
+                    return "STAND_D_DB_BB"
             elif str(self.oppAction) != "CROUCH_GUARD":
-                return "CROUCH_FB"
+                    return "CROUCH_FB"
             else:
-                return random.choice(["STAND_A", "STAND_B", "STAND_FA", "STAND_FB","CROUCH_A","CROUCH_B","CROUCH_FA","CROUCH_FB"])
+                return random.choice(["STAND_A", "STAND_B", "STAND_FA", "STAND_FB","CROUCH_A","CROUCH_B","CROUCH_FA"])
 
         elif (str(self.myState) == "STAND" or str(self.myState) == "CROUCH") and (str(self.oppState) == "DOWN"):
             print("active attack:STAND DOWN")
@@ -308,17 +321,20 @@ class StylizedAI(object):
 
         elif (str(self.myState) == "STAND" or str(self.myState) == "CROUCH") and str(self.oppState) == "AIR":
             print("active attack:STAND AIR")
-            if (int(self.oppFront)* self.oppSpeedX) > 0:
-            # L Dragon Fist!
-                if self.myEnergy >= 100:
+            if (int(self.oppFront) * self.oppSpeedX) > 0:
+                if self.distance >= 175:
+                    return "STAND_FB"
+                elif self.myEnergy >= 100:
+                    # L Dragon!
                     return "STAND_F_D_DFB"
                 else:
-                    return random.choice(["STAND_FB", "CROUCH_FA"])
+                    return random.choice(["STAND_F_D_DFA", "CROUCH_FA"])
             else:
                 return self.neutral()
 
         elif str(self.myState) == "AIR" and (str(self.oppState) == "STAND" or str(self.oppState) == "CROUCH"):
             print("active attack:AIR STAND")
+
             return random.choice(["AIR_DA", "AIR_DB"])
 
         elif str(self.myState) == "AIR" and str(self.oppState) == "AIR":
@@ -351,6 +367,72 @@ class StylizedAI(object):
     def get_agent_type(self):
         print(self.agent_type_strs[self.agent_type - 1])
         return self.agent_type
+
+    def isEnoughEnergy(self, act, player):
+        ch = self.frameData.getCharacter(player)
+        motion = self.my_motion if player else self.opp_motion
+        return motion.get(act.ordinal()).getAttackStartAddEnergy() + ch.getEnergy() >= 0
+
+    def IsInHitArea(self, ac):
+        mych = self.frameData.getCharacter(self.player)
+        opch = self.frameData.getCharacter(not self.player)
+        if not self.isEnoughEnergy(ac, self.player):
+            return False
+        mo = self.my_motion.get(ac.ordinal())
+        hi = mo.attackHitArea
+
+        top = mych.getY() + hi.getTop()
+        bottom = mych.getY() + hi.getBottom()
+        bottom += mo.getAttackStartUp() * mo.getSpeedY()
+        top += mo.getAttackStartUp() * mo.getSpeedY()
+
+        if mo.getAttackSpeedY() > 0:
+            bottom += mo.attackActive * mo.getAttackSpeedY()
+        else:
+            top += mo.attackActive * mo.getAttackSpeedY()
+        if mo.getSpeedY() > 0:
+            bottom += mo.attackActive * mo.getSpeedY()
+        else:
+            top += mo.attackActive * mo.getSpeedY()
+
+        frontfugou = 1
+        if mych.isFront():
+            left = mych.getX() + hi.getLeft()
+            right = mych.getX() + hi.getRight()
+        else:
+            frontfugou = -1
+            left = mych.getX() + mych.getGraphicSizeX() - hi.getRight()
+            right = mych.getX() + mych.getGraphicSizeX() - hi.getLeft()
+
+        left += mo.getAttackStartUp() * mo.getSpeedX() * frontfugou
+        right += mo.getAttackStartUp() * mo.getSpeedX() * frontfugou
+
+        if mo.getAttackSpeedX() * frontfugou > 0:
+            right += mo.attackActive * mo.getAttackSpeedX() * frontfugou
+        else:
+            left += mo.attackActive * mo.getAttackSpeedX() * frontfugou
+
+        if mo.getSpeedX() * frontfugou > 0:
+            right += mo.attackActive * mo.getSpeedX() * frontfugou
+        else:
+            left += mo.attackActive * mo.getSpeedX() * frontfugou
+
+        oright = opch.getRight()
+        oleft = opch.getLeft()
+        otop = opch.getTop()
+        obottom = opch.getBottom()
+
+        if right < oleft:
+            return False
+        if oright < left:
+            return False
+        if bottom < otop:
+            return False
+        if obottom < top:
+            return False
+
+        return True
+
 
     # This part is mandatory
     class Java:

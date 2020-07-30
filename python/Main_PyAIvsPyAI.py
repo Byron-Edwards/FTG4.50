@@ -4,6 +4,8 @@ from time import sleep
 from py4j.java_gateway import JavaGateway, GatewayParameters, CallbackServerParameters, get_field
 from OpenAI.StylizedAI import StylizedAI
 from OpenAI.RandomAI import RandomAI
+
+# java -cp FightingICE.jar:./lib/lwjgl/*:./lib/natives/linux/*:./lib/*  Main  --mute --grey-bg --limithp 400 400 --py4j --fastmode
 def check_args(args):
     for i in range(argc):
         if args[i] == "-n" or args[i] == "--n" or args[i] == "--number":
