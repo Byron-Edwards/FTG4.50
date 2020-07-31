@@ -7,7 +7,6 @@ class StylizedAI(object):
     def __init__(self, gateway, frameskip=True, agent_type=0):
         # Agent type: 1 = Aggressive, 2 = mixing, 3 = defensive
         self.gateway = gateway
-        self.java_actions = self.gateway.jvm.enumerate.Action
         self.obs = None
         self.just_inited = True
         self._actions = "AIR AIR_A AIR_B AIR_D_DB_BA AIR_D_DB_BB AIR_D_DF_FA AIR_D_DF_FB AIR_DA AIR_DB AIR_F_D_DFA AIR_F_D_DFB AIR_FA AIR_FB AIR_GUARD AIR_GUARD_RECOV AIR_RECOV AIR_UA AIR_UB BACK_JUMP BACK_STEP CHANGE_DOWN CROUCH CROUCH_A CROUCH_B CROUCH_FA CROUCH_FB CROUCH_GUARD CROUCH_GUARD_RECOV CROUCH_RECOV DASH DOWN FOR_JUMP FORWARD_WALK JUMP LANDING NEUTRAL RISE STAND STAND_A STAND_B STAND_D_DB_BA STAND_D_DB_BB STAND_D_DF_FA STAND_D_DF_FB STAND_D_DF_FC STAND_F_D_DFA STAND_F_D_DFB STAND_FA STAND_FB STAND_GUARD STAND_GUARD_RECOV STAND_RECOV THROW_A THROW_B THROW_HIT THROW_SUFFER"
@@ -91,9 +90,9 @@ class StylizedAI(object):
 
             self.inputKey.empty()
             self.cc.skillCancel()
-        # self.calc = Calculator(self.frameData, self.gameData, self.player, Calculator.NONACT)
+        self.calc = Calculator(self.frameData, self.gameData, self.player, Calculator.NONACT, self.gateway)
         self.get_obs()
-        action = self.act()
+        action = self.act2()
         if str(action) == "CROUCH_GUARD":
             action = "1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1"
         elif str(action) == "STAND_GUARD":
@@ -468,8 +467,8 @@ class StylizedAI(object):
         # later need to use the precise judgement
         if self.is_down() and self.can_hall_wall(250):
             return self.defence()
-        if str(self.myState != "AIR"):
-            moveActs=self.calc.getEnoughEnergyActions(False,"NEUTRAL")
+        if str(self.myState) != "AIR":
+            moveActs=self.calc.getEnoughEnergyActions(False, ["NEUTRAL"])
             if self.calc.canHitFromNow("STAND_D_DF_FC", self.player):
                 if 100 <= self.distance < 230:
                     return "STAND_D_DF_FC"
@@ -478,17 +477,18 @@ class StylizedAI(object):
                 if self.calc.canHameWall(self.player, 50) and self.calc.getMinHpScore("CROUCH_FB", moveActs) > 0:
                     return "CROUCH_FB"
 
-        if self.distance<300:
+        if self.distance < 300:
             movingActions = self.calc.getEnoughEnergyActions(self.player,["FOR_JUMP","FORWARD_WALK","NEUTRAL","JUMP"])
         else:
             movingActions = self.calc.getEnoughEnergyActions(self.player,["FORWARD_WALK", "FOR_JUMP", "NEUTRAL", "JUMP"])
+
         if self.calc.canHameWall(not self.player,50):
             nigeActions = self.calc.getEnoughEnergyActions(self.player,
                                                              ["NEUTRAL", "FOR_JUMP", "FORWARD_WALK", "NEUTRAL","BACK_STEP","JUMP","BACK_JUMP"])
-        elif self.distance<300:
+        elif self.distance < 300:
             nigeActions = self.calc.getEnoughEnergyActions(self.player,
                                                            ["BACK_STEP", "NEUTRAL", "JUMP", "FOR_JUMP","FORWARD_WALK", "BACK_JUMP"])
-        elif self.distance<600:
+        elif self.distance < 600:
             nigeActions = self.calc.getEnoughEnergyActions(self.player,
                                                            ["NEUTRAL", "BACK_STEP", "JUMP", "FOR_JUMP","FORWARD_WALK", "BACK_JUMP"])
         else:
@@ -496,9 +496,9 @@ class StylizedAI(object):
                                                            ["FORWARD_WALK", "NEUTRAL", "BACK_STEP", "FOR_JUMP", "JUMP","BACK_JUMP"])
 
         HittingMyActions = []
-        bestscore = -9999;
+        bestscore = -9999
         bestac = None
-        myacs = self._action_air.split() if str(self.myState)=="AIR" else self._action_ground.split()
+        myacs = self._action_air.split() if str(self.myState) == "AIR" else self._action_ground.split()
         for ac in myacs:
             hpscore=self.calc.getHpScore(ac)
             mo=self.my_motion.get(pyactions.Action.to_ordinal(ac))
@@ -518,17 +518,13 @@ class StylizedAI(object):
                 HittingOpActions.append(ac)
         HittingOpActions.append("NEUTRAL")
 
-        if not HittingMyActions:
+        if HittingMyActions:
             return self.calc.getMinMaxHp(HittingMyActions, HittingOpActions)
-        elif not self.at_advantage():
+        elif self.agent_type == 1 or (self.agent_type == 2 and not self.at_advantage()):
             return self.calc.getMinMaxHp(movingActions, HittingOpActions)
         else:
             return self.calc.getMinMaxHp(nigeActions, HittingOpActions)
 
-    def getJavaAction(self, action):
-        for Jaction in self.java_actions:
-            if str(action) == Jaction.name():
-                return Jaction
 
     # Active attack behavior when opp is not using attack or after the opp attack active frame
     # TODO need to test

@@ -5,7 +5,9 @@ import python.action as pyactions
 class Calculator:
     SIMULATE_LIMIT = 80
     NONACT = pyactions.Action.NEUTRAL
-    def __init__(self, motoFrame, gd, player, preAct):
+    def __init__(self, motoFrame, gd, player, preAct,gateway):
+        self.gateway = gateway
+        self.java_actions = self.gateway.jvm.enumerate.Action
         self.motoFrame = motoFrame
         self.gd = gd
         self.simlator = gd.getSimulator()
@@ -74,10 +76,10 @@ class Calculator:
         key = (tmyact, topact)
 
         if key not in self.map:
-            mAction = list()
-            mAction.append(tmyact)
-            opAction = list()
-            opAction.append(topact)
+            mAction = self.gateway.jvm.java.util.LinkedList()
+            mAction.append(self.getJavaAction(tmyact))
+            opAction = self.gateway.jvm.java.util.LinkedList()
+            opAction.append(self.getJavaAction(topact))
             value = self.simlator.simulate(self.motoFrame, self.player, mAction, opAction, self.SIMULATE_LIMIT)
             self.map[key] = value
         return self.map[key]
@@ -133,6 +135,10 @@ class Calculator:
             if score < min:
                 min = score
         return min
+
+
+    def getJavaAction(self, action):
+        return self.java_actions.values()[pyactions.Action.to_ordinal(action)]
 
     def getMinMaxHp(self, myAcs, opAcs):
         alpha = -9999
