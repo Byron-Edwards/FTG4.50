@@ -9,7 +9,6 @@ import torch.multiprocessing as mp
 from torch.optim import Adam
 from torch.distributions import Categorical
 from copy import deepcopy
-from spinup.utils.logx import EpochLogger
 from OpenAI.atari_wrappers import make_ftg_ram
 from model_parameter_trans import state_dict_trans
 
@@ -49,6 +48,7 @@ class Counter():
         with self.lock:
             return self.val.value
 
+
 class Actor(nn.Module):
     def __init__(self, obs_dim, act_dim, hidden_sizes, activation, output_activation=nn.Identity):
         super().__init__()
@@ -58,6 +58,7 @@ class Actor(nn.Module):
         net_out = self.net(obs)
         a_prob = F.softmax(net_out, dim=1).clamp(min=1e-20, max=1-1e-20)
         return a_prob
+
 
 class Critic(nn.Module):
     def __init__(self, obs_dim, act_dim, hidden_sizes, activation, output_activation=nn.Identity):
@@ -83,10 +84,73 @@ class MLPActorCritic(nn.Module):
         self.q1 = Critic(obs_dim, act_dim, hidden_sizes, activation)
         self.q2 = Critic(obs_dim, act_dim, hidden_sizes, activation)
 
-    def act(self, obs, greedy=False):
+    # Set up function for computing SAC Q-losses
+    def compute_loss_q(self,data, ac_targ, gamma, alpha):
+        o, a, r, o2, d = data['obs'], data['act'], data['rew'], data['obs2'], data['done']
+        # Bellman backup for Q functions
+        with torch.no_grad():
+            # Target actions come from *current* policy
+            a_prob, log_a_prob, sample_a, max_a = self.get_actions_info(self.pi(o2))
+
+            # Target Q-values
+            q1_pi_targ = ac_targ.q1(o2)
+            q2_pi_targ = ac_targ.q2(o2)
+            q_pi_targ = torch.min(q1_pi_targ, q2_pi_targ)
+            backup = r + gamma * (1 - d) * (a_prob * (q_pi_targ - alpha * log_a_prob)).sum(dim=1)
+
+        # MSE loss against Bellman backup
+        q1 = self.q1(o).gather(1, a.unsqueeze(-1).long())
+        q2 = self.q2(o).gather(1, a.unsqueeze(-1).long())
+        loss_q1 = F.mse_loss(q1, backup.unsqueeze(-1))
+        loss_q2 = F.mse_loss(q2, backup.unsqueeze(-1))
+        loss_q = loss_q1 + loss_q2
+
+        # Useful info for logging
+        q_info = dict(Q1Vals=q1.detach().numpy(),
+                      Q2Vals=q2.detach().numpy())
+
+        return loss_q, q_info
+
+    # Set up function for computing SAC pi loss
+    def compute_loss_pi(self, data, alpha):
+        o = data['obs']
+        a_prob, log_a_prob, sample_a, max_a = self.get_actions_info(self.pi(o))
+        q1_pi = self.q1(o)
+        q2_pi = self.q2(o)
+        q_pi = torch.min(q1_pi, q2_pi)
+
+        # Entropy-regularized policy loss
+        loss_pi = (a_prob * (alpha * log_a_prob - q_pi)).mean()
+        entropy = torch.sum(log_a_prob * a_prob, dim=1).detach()
+
+        # Useful info for logging
+        pi_info = dict(LogPi=entropy.numpy())
+        return loss_pi, pi_info
+
+    def act(self, obs):
         with torch.no_grad():
             a_prob = self.pi(obs)
             return a_prob
+
+    def get_action(self, o, greedy=False):
+        if len(o.shape) == 1:
+            o = np.expand_dims(o, axis=0)
+        a_prob = self.act(torch.as_tensor(o, dtype=torch.float32))
+        a_prob, log_a_prob, sample_a, max_a = self.get_actions_info(a_prob)
+        action = sample_a if not greedy else max_a
+        return action.item()
+
+        # product action
+
+    @staticmethod
+    def get_actions_info(a_prob):
+        a_dis = Categorical(a_prob)
+        max_a = torch.argmax(a_prob)
+        sample_a = a_dis.sample().cpu()
+        z = a_prob == 0.0
+        z = z.float() * 1e-8
+        log_a_prob = torch.log(a_prob + z)
+        return a_prob, log_a_prob, sample_a, max_a
 
 
 class ReplayBuffer:
@@ -121,286 +185,39 @@ class ReplayBuffer:
         return {k: torch.as_tensor(v, dtype=torch.float32) for k, v in batch.items()}
 
 
-def sac(global_ac, global_ac_targ, rank, T, scores, args, env_fn=None, actor_critic=MLPActorCritic, ac_kwargs=dict(), seed=0,
+def sac(global_ac, global_ac_targ, rank, T, args, actor_critic=MLPActorCritic, ac_kwargs=dict(), env =None, p2 =None,seed=0,
         steps_per_epoch=4000, epochs=100, replay_size=int(1e6), gamma=0.99,
         polyak=0.995, lr=1e-3, alpha=0.2, batch_size=100, start_steps=10000,
-        update_after=1000, update_every=50, num_test_episodes=10, max_ep_len=1000,
-        logger_kwargs=dict(), save_freq=1):
-    """
-    Soft Actor-Critic (SAC)
+        update_after=1000, update_every=50, max_ep_len=1000,
+        save_freq=1):
+    torch.manual_seed(seed + rank)
+    np.random.seed(seed + rank)
 
-
-    Args:
-        env_fn : A function which creates a copy of the environment.
-            The environment must satisfy the OpenAI Gym API.
-
-        actor_critic: The constructor method for a PyTorch Module with an ``act``
-            method, a ``pi`` module, a ``q1`` module, and a ``q2`` module.
-            The ``act`` method and ``pi`` module should accept batches of
-            observations as inputs, and ``q1`` and ``q2`` should accept a batch
-            of observations and a batch of actions as inputs. When called,
-            ``act``, ``q1``, and ``q2`` should return:
-
-            ===========  ================  ======================================
-            Call         Output Shape      Description
-            ===========  ================  ======================================
-            ``act``      (batch, act_dim)  | Numpy array of actions for each
-                                           | observation.
-            ``q1``       (batch,)          | Tensor containing one current estimate
-                                           | of Q* for the provided observations
-                                           | and actions. (Critical: make sure to
-                                           | flatten this!)
-            ``q2``       (batch,)          | Tensor containing the other current
-                                           | estimate of Q* for the provided observations
-                                           | and actions. (Critical: make sure to
-                                           | flatten this!)
-            ===========  ================  ======================================
-
-            Calling ``pi`` should return:
-
-            ===========  ================  ======================================
-            Symbol       Shape             Description
-            ===========  ================  ======================================
-            ``a``        (batch, act_dim)  | Tensor containing actions from policy
-                                           | given observations.
-            ``logp_pi``  (batch,)          | Tensor containing log probabilities of
-                                           | actions in ``a``. Importantly: gradients
-                                           | should be able to flow back into ``a``.
-            ===========  ================  ======================================
-
-        ac_kwargs (dict): Any kwargs appropriate for the ActorCritic object
-            you provided to SAC.
-
-        seed (int): Seed for random number generators.
-
-        steps_per_epoch (int): Number of steps of interaction (state-action pairs)
-            for the agent and the environment in each epoch.
-
-        epochs (int): Number of epochs to run and train agent.
-
-        replay_size (int): Maximum length of replay buffer.
-
-        gamma (float): Discount factor. (Always between 0 and 1.)
-
-        polyak (float): Interpolation factor in polyak averaging for target
-            networks. Target networks are updated towards main networks
-            according to:
-
-            .. math:: \\theta_{\\text{targ}} \\leftarrow
-                \\rho \\theta_{\\text{targ}} + (1-\\rho) \\theta
-
-            where :math:`\\rho` is polyak. (Always between 0 and 1, usually
-            close to 1.)
-
-        lr (float): Learning rate (used for both policy and value learning).
-
-        alpha (float): Entropy regularization coefficient. (Equivalent to
-            inverse of reward scale in the original SAC paper.)
-
-        batch_size (int): Minibatch size for SGD.
-
-        start_steps (int): Number of steps for uniform-random action selection,
-            before running real policy. Helps exploration.
-
-        update_after (int): Number of env interactions to collect before
-            starting to do gradient descent updates. Ensures replay buffer
-            is full enough for useful updates.
-
-        update_every (int): Number of env interactions that should elapse
-            between gradient descent updates. Note: Regardless of how long
-            you wait between updates, the ratio of env steps to gradient steps
-            is locked to 1.
-
-        num_test_episodes (int): Number of episodes to test the deterministic
-            policy at the end of each epoch.
-
-        max_ep_len (int): Maximum length of trajectory / episode / rollout.
-
-        logger_kwargs (dict): Keyword args for EpochLogger.
-
-        save_freq (int): How often (in terms of gap between epochs) to save
-            the current policy and value function.
-
-    """
-
-    # logger = EpochLogger(**logger_kwargs)
-    # logger.save_config(locals())
-
-    torch.manual_seed(seed)
-    np.random.seed(seed)
-
-    env = make_ftg_ram(args.env, p2=args.p2)
+    env = make_ftg_ram(env, p2=p2)
     obs_dim = env.observation_space.shape[0]
-    act_dim = env.action_space.n
-
-    # Action limit for clamping: critically, assumes all dimensions share the same bound!
-    # act_limit = env.action_space.high[0]
-
-    # Create actor-critic module and target networks
-    # ac = actor_critic(env.observation_space, env.action_space, **ac_kwargs)
-    # ac_targ = deepcopy(ac)
+    print("set up child process env")
     local_ac = actor_critic(env.observation_space, env.action_space, **ac_kwargs)
     local_ac.load_state_dict(global_ac.state_dict())
-
+    print("local ac load global ac")
     # Freeze target networks with respect to optimizers (only update via polyak averaging)
-
-    # Single Thread Version
-    # for p in ac_targ.parameters():
-    #     p.requires_grad = False
-
     # Async Version
     for p in global_ac_targ.parameters():
         p.requires_grad = False
 
-    # List of parameters for both Q-networks (save this for convenience)
-
     # Experience buffer
     replay_buffer = ReplayBuffer(obs_dim=obs_dim, size=replay_size)
 
-    # Count variables (protip: try to get a feel for how different size networks behave!), not need inside train in async version
-    # var_counts = tuple(count_vars(module) for module in [ac.pi, ac.q1, ac.q2])
-    # logger.log('\nNumber of parameters: \t pi: %d, \t q1: %d, \t q2: %d\n' % var_counts)
-
     # Set up optimizers for policy and q-function
-    # Single Thread Version
-    # pi_optimizer = Adam(ac.pi.parameters(), lr=lr)
-    # q1_optimizer = Adam(ac.q1.parameters(), lr=lr)
-    # q2_optimizer = Adam(ac.q2.parameters(), lr=lr)
     # Async Version
     pi_optimizer = Adam(global_ac.pi.parameters(), lr=lr)
     q1_optimizer = Adam(global_ac.q1.parameters(), lr=lr)
     q2_optimizer = Adam(global_ac.q2.parameters(), lr=lr)
 
-    # Set up model saving
-    # logger.setup_pytorch_saver(local_ac)
-
-    # product action
-    def get_actions_info(a_prob):
-        a_dis = Categorical(a_prob)
-        max_a = torch.argmax(a_prob)
-        sample_a = a_dis.sample().cpu()
-        z = a_prob == 0.0
-        z = z.float() * 1e-8
-        log_a_prob = torch.log(a_prob + z)
-        return a_prob, log_a_prob, sample_a, max_a
-
-    # Set up function for computing SAC Q-losses
-    def compute_loss_q(data):
-        o, a, r, o2, d = data['obs'], data['act'], data['rew'], data['obs2'], data['done']
-
-        # Bellman backup for Q functions
-        with torch.no_grad():
-            # Target actions come from *current* policy
-            a_prob, log_a_prob, sample_a, max_a = get_actions_info(local_ac.pi(o2))
-
-            # Target Q-values
-            q1_pi_targ = global_ac_targ.q1(o2)
-            q2_pi_targ = global_ac_targ.q2(o2)
-            q_pi_targ = torch.min(q1_pi_targ, q2_pi_targ)
-            backup = r + gamma * (1 - d) * (a_prob * (q_pi_targ - alpha * log_a_prob)).sum(dim=1)
-
-        # MSE loss against Bellman backup
-        q1 = local_ac.q1(o).gather(1, a.unsqueeze(-1).long())
-        q2 = local_ac.q2(o).gather(1, a.unsqueeze(-1).long())
-        loss_q1 = F.mse_loss(q1, backup.unsqueeze(-1))
-        loss_q2 = F.mse_loss(q2, backup.unsqueeze(-1))
-        loss_q = loss_q1 + loss_q2
-
-        # Useful info for logging
-        q_info = dict(Q1Vals=q1.detach().numpy(),
-                      Q2Vals=q2.detach().numpy())
-
-        return loss_q, q_info
-
-    # Set up function for computing SAC pi loss
-    def compute_loss_pi(data):
-        o = data['obs']
-        a_prob, log_a_prob, sample_a, max_a = get_actions_info(local_ac.pi(o))
-        q1_pi = local_ac.q1(o)
-        q2_pi = local_ac.q2(o)
-        q_pi = torch.min(q1_pi, q2_pi)
-
-        # Entropy-regularized policy loss
-        loss_pi = (a_prob * (alpha * log_a_prob - q_pi)).mean()
-        entropy = torch.sum(log_a_prob * a_prob, dim=1).detach()
-
-        # Useful info for logging
-        pi_info = dict(LogPi=entropy.numpy())
-        return loss_pi, pi_info
-
-    def update(data):
-        # First run one gradient descent step for Q1 and Q2
-        q1_optimizer.zero_grad()
-        q2_optimizer.zero_grad()
-        loss_q, q_info = compute_loss_q(data)
-        loss_q.backward()
-
-
-        # Record things
-        # logger.store(LossQ=loss_q.detach().item(), **q_info)
-
-        # Freeze Q-networks so you don't waste computational effort
-        # computing gradients for them during the policy learning step.
-        # for p in q_params:
-        #     p.requires_grad = False
-
-        # Next run one gradient descent step for pi.
-        pi_optimizer.zero_grad()
-        loss_pi, pi_info = compute_loss_pi(data)
-        loss_pi.backward()
-
-        for global_param, local_param in zip(global_ac.parameters(), local_ac.parameters()):
-            global_param._grad = local_param.grad
-
-        pi_optimizer.step()
-        q1_optimizer.step()
-        q2_optimizer.step()
-
-        local_ac.load_state_dict(global_ac.state_dict())
-
-        # Unfreeze Q-networks so you can optimize it at next DDPG step.
-        # for p in q_params:
-            # p.requires_grad = True
-
-        # Record things
-        # logger.store(LossPi=loss_pi.item(), **pi_info)
-
-        # Finally, update target networks by polyak averaging.
-        with torch.no_grad():
-            # for p, p_targ in zip(ac.parameters(), ac_targ.parameters()):
-                # NB: We use an in-place operations "mul_", "add_" to update target
-                # params, as opposed to "mul" and "add", which would make new tensors.
-                # p_targ.data.copy_((1 - polyak) * p.data + polyak * p_targ.data)
-                # p_targ.data.mul_(polyak)
-                # p_targ.data.add_((1 - polyak) * p.data)
-            for p, p_targ in zip(global_ac.parameters(), global_ac_targ.parameters()):
-                p_targ.data.copy_((1 - polyak) * p.data + polyak * p_targ.data)
-
-    def get_action(o, greedy=False):
-        if len(o.shape) == 1:
-            o = np.expand_dims(o, axis=0)
-        a_prob = local_ac.act(torch.as_tensor(o, dtype=torch.float32), greedy)
-        a_prob, log_a_prob, sample_a, max_a = get_actions_info(a_prob)
-        action = sample_a if not greedy else max_a
-        return action.item()
-
-    # def test_agent():
-    #     for j in range(num_test_episodes):
-    #         o, d, ep_ret, ep_len = test_env.reset(), False, 0, 0
-    #         while not (d or (ep_len == max_ep_len)):
-    #             # Take deterministic actions at test time
-    #             o, r, d, _ = test_env.step(get_action(o, True))
-    #             # test_env.render()
-    #             ep_ret += r
-    #             ep_len += 1
-    #         logger.store(TestEpRet=ep_ret, TestEpLen=ep_len)
-    #         print(ep_ret)
-
     # Prepare for interaction with environment
     total_steps = steps_per_epoch * epochs
-    start_time = time.time()
     o, ep_ret, ep_len = env.reset(), 0, 0
     discard = False
+    scores = []
     t = T.value()
     # Main loop: collect experience in env and update/log each epoch
     while t <= total_steps:
@@ -409,7 +226,7 @@ def sac(global_ac, global_ac_targ, rank, T, scores, args, env_fn=None, actor_cri
         # from a uniform distribution for better exploration. Afterwards,
         # use the learned policy.
         if t > start_steps:
-            a = get_action(o)
+            a = local_ac.get_action(o)
         else:
             a = env.action_space.sample()
 
@@ -449,7 +266,30 @@ def sac(global_ac, global_ac_targ, rank, T, scores, args, env_fn=None, actor_cri
         if t >= update_after and t % update_every == 0:
             for j in range(update_every):
                 batch = replay_buffer.sample_batch(batch_size)
-                update(data=batch)
+                # First run one gradient descent step for Q1 and Q2
+                q1_optimizer.zero_grad()
+                q2_optimizer.zero_grad()
+                loss_q, q_info = local_ac.compute_loss_q(batch, global_ac_targ, gamma, alpha)
+                loss_q.backward()
+
+                # Next run one gradient descent step for pi.
+                pi_optimizer.zero_grad()
+                loss_pi, pi_info = local_ac.compute_loss_pi(batch, alpha)
+                loss_pi.backward()
+
+                for global_param, local_param in zip(global_ac.parameters(), local_ac.parameters()):
+                    global_param._grad = local_param.grad
+
+                pi_optimizer.step()
+                q1_optimizer.step()
+                q2_optimizer.step()
+
+                local_ac.load_state_dict(global_ac.state_dict())
+
+                # Finally, update target networks by polyak averaging.
+                with torch.no_grad():
+                    for p, p_targ in zip(global_ac.parameters(), global_ac_targ.parameters()):
+                        p_targ.data.copy_((1 - polyak) * p.data + polyak * p_targ.data)
 
         # End of epoch handling
         if (t + 1) % steps_per_epoch == 0:
@@ -459,34 +299,13 @@ def sac(global_ac, global_ac_targ, rank, T, scores, args, env_fn=None, actor_cri
                 state_dict_trans(global_ac.state_dict(), os.path.join(args.save_dir, args.numpy_para))
                 print("Saving model at episode:{}".format(t))
 
-            # Save model
-            # if (epoch % save_freq == 0) or (epoch == epochs):
-            #     logger.save_state({'env': env}, None)
-
-            # Test the performance of the deterministic version of the agent.
-            # test_agent()
-
-            # Log info about epoch
-            # logger.log_tabular('Epoch', epoch)
-            # logger.log_tabular('EpRet', with_min_and_max=True)
-            # logger.log_tabular('TestEpRet', with_min_and_max=True)
-            # logger.log_tabular('EpLen', average_only=True)
-            # logger.log_tabular('TestEpLen', average_only=True)
-            # logger.log_tabular('TotalEnvInteracts', t)
-            # logger.log_tabular('Q1Vals', with_min_and_max=True)
-            # logger.log_tabular('Q2Vals', with_min_and_max=True)
-            # logger.log_tabular('LogPi', with_min_and_max=True)
-            # logger.log_tabular('LossPi', average_only=True)
-            # logger.log_tabular('LossQ', average_only=True)
-            # logger.log_tabular('Time', time.time() - start_time)
-            # logger.dump_tabular()
-
 
 if __name__ == '__main__':
     import argparse
+    mp.set_start_method("fork")
     parser = argparse.ArgumentParser()
     parser.add_argument('--env', type=str, default="FightingiceDataFrameskip-v0")
-    parser.add_argument('--p2', type=str, default="ReiwaThunder")
+    parser.add_argument('--p2', type=str, default="Toothless")
     parser.add_argument('--hid', type=int, default=256)
     parser.add_argument('--l', type=int, default=2)
     parser.add_argument('--gamma', type=float, default=0.99)
@@ -498,47 +317,42 @@ if __name__ == '__main__':
     parser.add_argument('--save-dir', type=str, default="./OpenAI/SAC")
     parser.add_argument('--numpy_para', type=str, default="sac.pkl")
     args = parser.parse_args()
-    from spinup.utils.run_utils import setup_logger_kwargs
-    logger_kwargs = setup_logger_kwargs(args.exp_name, args.seed)
     torch.set_num_threads(torch.get_num_threads())
     if not os.path.exists(args.save_dir):
         os.makedirs(args.save_dir)
 
     ac_kwargs = dict(hidden_sizes=[args.hid] * args.l)
     env = make_ftg_ram(args.env, p2=args.p2)
-    global_ac = MLPActorCritic(env.observation_space, env.action_space, **ac_kwargs).share_memory()
-    global_ac_targ = deepcopy(global_ac).share_memory()
+    global_ac = MLPActorCritic(env.observation_space, env.action_space, **ac_kwargs)
+    global_ac_targ = deepcopy(global_ac)
+    env.close()
+    del env
+    global_ac.share_memory()
+    global_ac_targ.share_memory()
 
     var_counts = tuple(count_vars(module) for module in [global_ac.pi, global_ac.q1, global_ac.q2])
     print('\nNumber of parameters: \t pi: %d, \t q1: %d, \t q2: %d\n' % var_counts)
 
-    # sac(lambda: make_ftg_ram(args.env, p2=args.p2), actor_critic=MLPActorCritic,
-    #     ac_kwargs=ac_kwargs,
-    #     gamma=args.gamma, seed=args.seed, epochs=args.epochs, steps_per_epoch=4000, replay_size=int(1e6),
-    #     polyak=0.995, lr=args.lr, alpha=0.2, batch_size=128, start_steps=10000,
-    #     update_after=1000, update_every=100, num_test_episodes=20, max_ep_len=1000,
-    #     logger_kwargs=logger_kwargs)
-
     # this the kwargs for the single thread version
-    single_version_kwargs = dict(env_fn=None , actor_critic=MLPActorCritic,
+    single_version_kwargs = dict(actor_critic=MLPActorCritic,env=args.env,p2=args.p2,
                                  ac_kwargs=ac_kwargs, gamma=args.gamma, seed=args.seed, epochs=args.epochs,
                                  steps_per_epoch=1000, replay_size=int(1e6),
                                  polyak=0.995, lr=args.lr, alpha=0.2, batch_size=128, start_steps=10000,
-                                 update_after=10000, update_every=500, num_test_episodes=20, max_ep_len=1000,
-                                 logger_kwargs=logger_kwargs, save_freq=5000)
+                                 update_after=10000, update_every=500, max_ep_len=1000,
+                                 save_freq=5000)
 
     T = Counter()
-    scores = mp.Manager().list()
+    # scores = mp.Manager().list()
     processes = []
     for rank in range(args.n_process):  # + 1 for test process
         # if rank == 0:
             # p = mp.Process(target=test, args=(global_model,))
         # else:
-        p = mp.Process(target=sac, args=(global_ac, global_ac_targ, rank, T, scores,args), kwargs=single_version_kwargs)
+        p = mp.Process(target=sac, args=(global_ac, global_ac_targ, rank, T, args), kwargs=single_version_kwargs)
         p.start()
         processes.append(p)
-    for p in processes:
-        p.join()
+    # for p in processes:
+    #     p.join()
 
 
 
