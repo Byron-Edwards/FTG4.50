@@ -1,4 +1,6 @@
 import gym
+import argparse
+import gym_fightingice
 import os
 import time
 import numpy as np
@@ -27,9 +29,6 @@ def mlp(sizes, activation, output_activation=nn.Identity):
 def count_vars(module):
     return sum([np.prod(p.shape) for p in module.parameters()])
 
-
-LOG_STD_MAX = 2
-LOG_STD_MIN = -20
 
 class Counter():
     def __init__(self):
@@ -264,6 +263,7 @@ def sac(global_ac, global_ac_targ, rank, T, args,scores, ac_kwargs=dict(), env =
 
         # Update handling
         if t >= update_after and t % update_every == 0:
+            print("update network")
             for j in range(update_every):
                 batch = replay_buffer.sample_batch(batch_size)
                 # First run one gradient descent step for Q1 and Q2
@@ -295,26 +295,28 @@ def sac(global_ac, global_ac_targ, rank, T, args,scores, ac_kwargs=dict(), env =
         # End of epoch handling
         if (t + 1) % steps_per_epoch == 0:
             epoch = (t + 1) // steps_per_epoch
-            if t % save_freq == 0 and t > 0:
-                torch.save(global_ac.state_dict(), os.path.join(args.save_dir, "model"))
-                state_dict_trans(global_ac.state_dict(), os.path.join(args.save_dir, args.numpy_para))
-                print("Saving model at episode:{}".format(t))
+            print("Epoch: {}".format(epoch))
+        if t % save_freq == 0 and t > 0:
+            torch.save(global_ac.state_dict(), os.path.join(args.save_dir, "model"))
+            state_dict_trans(global_ac.state_dict(), os.path.join(args.save_dir, args.numpy_para))
+            print("Saving model at episode:{}".format(t))
 
 
 if __name__ == '__main__':
-    import argparse
-    mp.set_start_method("fork")
+    mp.set_start_method("forkserver")
+    os.environ['OMP_NUM_THREADS'] = '1'
+    os.environ['MKL_NUM_THREADS'] = '1'
     parser = argparse.ArgumentParser()
     parser.add_argument('--env', type=str, default="FightingiceDataFrameskip-v0")
     parser.add_argument('--p2', type=str, default="Toothless")
     parser.add_argument('--hid', type=int, default=256)
     parser.add_argument('--l', type=int, default=2)
     parser.add_argument('--gamma', type=float, default=0.99)
-    parser.add_argument('--lr', type=float, default=1e-3)
+    parser.add_argument('--lr', type=float, default=1e-4)
     parser.add_argument('--seed', '-s', type=int, default=0)
     parser.add_argument('--epochs', type=int, default=10000)
     parser.add_argument('--exp_name', type=str, default='sac')
-    parser.add_argument('--n_process', type=int, default=1)
+    parser.add_argument('--n_process', type=int, default=4)
     parser.add_argument('--save-dir', type=str, default="./OpenAI/SAC")
     parser.add_argument('--numpy_para', type=str, default="sac.pkl")
     args = parser.parse_args()
@@ -338,8 +340,8 @@ if __name__ == '__main__':
     single_version_kwargs = dict(ac_kwargs=ac_kwargs,env=args.env,p2=args.p2, gamma=args.gamma, seed=args.seed, epochs=args.epochs,
                                  steps_per_epoch=1000, replay_size=int(1e6),
                                  polyak=0.995, lr=args.lr, alpha=0.2, batch_size=128, start_steps=10000,
-                                 update_after=10000, update_every=500, max_ep_len=1000,
-                                 save_freq=5000)
+                                 update_after=10000, update_every=10, max_ep_len=500,
+                                 save_freq=1000)
 
     T = Counter()
     scores = mp.Manager().list()
@@ -350,6 +352,7 @@ if __name__ == '__main__':
         # else:
         p = mp.Process(target=sac, args=(global_ac, global_ac_targ, rank, T, args, scores), kwargs=single_version_kwargs)
         p.start()
+        time.sleep(5)
         processes.append(p)
     for p in processes:
         p.join()

@@ -361,8 +361,9 @@ def sac(env_fn, actor_critic=MLPActorCritic, ac_kwargs=dict(), seed=0,
     # Prepare for interaction with environment
     total_steps = steps_per_epoch * epochs
     start_time = time.time()
+    scores = []
     o, ep_ret, ep_len = env.reset(), 0, 0
-
+    discard = False
     # Main loop: collect experience in env and update/log each epoch
     for t in range(total_steps):
 
@@ -375,7 +376,9 @@ def sac(env_fn, actor_critic=MLPActorCritic, ac_kwargs=dict(), seed=0,
             a = env.action_space.sample()
 
         # Step the env
-        o2, r, d, _ = env.step(a)
+        o2, r, d, info = env.step(a)
+        if info.get('no_data_receive', False):
+            discard = True
         env.render()
         ep_ret += r
         ep_len += 1
@@ -383,7 +386,7 @@ def sac(env_fn, actor_critic=MLPActorCritic, ac_kwargs=dict(), seed=0,
         # Ignore the "done" signal if it comes from hitting the time
         # horizon (that is, when it's an artificial terminal signal
         # that isn't based on the agent's state)
-        d = False if ep_len == max_ep_len else d
+        d = False if ep_len == max_ep_len or discard else d
 
         # Store experience to replay buffer
         replay_buffer.store(o, a, r, o2, d)
@@ -393,13 +396,16 @@ def sac(env_fn, actor_critic=MLPActorCritic, ac_kwargs=dict(), seed=0,
         o = o2
 
         # End of trajectory handling
-        if d or (ep_len == max_ep_len):
+        if d or (ep_len == max_ep_len) or discard:
             logger.store(EpRet=ep_ret, EpLen=ep_len)
+            scores.append(ep_ret)
+            print("round len:{}, round score: {}, mean score: {}".format(ep_len, ep_ret, np.mean(scores[-100:])))
             o, ep_ret, ep_len = env.reset(), 0, 0
+            discard = False
+
 
         # Update handling
         if t >= update_after and t % update_every == 0:
-            print("Start to update")
             for j in range(update_every):
                 batch = replay_buffer.sample_batch(batch_size)
                 update(data=batch)
@@ -416,23 +422,23 @@ def sac(env_fn, actor_critic=MLPActorCritic, ac_kwargs=dict(), seed=0,
             if (epoch % save_freq == 0) or (epoch == epochs):
                 logger.save_state({'env': env}, None)
 
-            # Test the performance of the deterministic version of the agent.
-            test_agent()
-
-            # Log info about epoch
-            logger.log_tabular('Epoch', epoch)
-            logger.log_tabular('EpRet', with_min_and_max=True)
-            logger.log_tabular('TestEpRet', with_min_and_max=True)
-            logger.log_tabular('EpLen', average_only=True)
-            logger.log_tabular('TestEpLen', average_only=True)
-            logger.log_tabular('TotalEnvInteracts', t)
-            logger.log_tabular('Q1Vals', with_min_and_max=True)
-            logger.log_tabular('Q2Vals', with_min_and_max=True)
-            logger.log_tabular('LogPi', with_min_and_max=True)
-            logger.log_tabular('LossPi', average_only=True)
-            logger.log_tabular('LossQ', average_only=True)
-            logger.log_tabular('Time', time.time() - start_time)
-            logger.dump_tabular()
+            # # Test the performance of the deterministic version of the agent.
+            # test_agent()
+            #
+            # # Log info about epoch
+            # logger.log_tabular('Epoch', epoch)
+            # logger.log_tabular('EpRet', with_min_and_max=True)
+            # logger.log_tabular('TestEpRet', with_min_and_max=True)
+            # logger.log_tabular('EpLen', average_only=True)
+            # logger.log_tabular('TestEpLen', average_only=True)
+            # logger.log_tabular('TotalEnvInteracts', t)
+            # logger.log_tabular('Q1Vals', with_min_and_max=True)
+            # logger.log_tabular('Q2Vals', with_min_and_max=True)
+            # logger.log_tabular('LogPi', with_min_and_max=True)
+            # logger.log_tabular('LossPi', average_only=True)
+            # logger.log_tabular('LossQ', average_only=True)
+            # logger.log_tabular('Time', time.time() - start_time)
+            # logger.dump_tabular()
 
 
 if __name__ == '__main__':
