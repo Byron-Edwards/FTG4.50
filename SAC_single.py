@@ -1,4 +1,5 @@
 import gym
+import os
 import time
 import itertools
 import numpy as np
@@ -10,6 +11,7 @@ from torch.distributions import Categorical
 from copy import deepcopy
 from spinup.utils.logx import EpochLogger
 from OpenAI.atari_wrappers import make_ftg_ram
+from model_parameter_trans import state_dict_trans
 
 
 def combined_shape(length, shape=None):
@@ -107,7 +109,7 @@ def sac(env_fn, actor_critic=MLPActorCritic, ac_kwargs=dict(), seed=0,
         steps_per_epoch=4000, epochs=100, replay_size=int(1e6), gamma=0.99,
         polyak=0.995, lr=1e-3, alpha=0.2, batch_size=100, start_steps=10000,
         update_after=1000, update_every=50, num_test_episodes=10, max_ep_len=1000,
-        logger_kwargs=dict(), save_freq=1):
+        logger_kwargs=dict(), save_freq=1000, save_dir=None):
     """
     Soft Actor-Critic (SAC)
 
@@ -407,6 +409,10 @@ def sac(env_fn, actor_critic=MLPActorCritic, ac_kwargs=dict(), seed=0,
             epoch = (t + 1) // steps_per_epoch
 
             # Save model
+            if t % save_freq == 0 and t > 0:
+                torch.save(ac.state_dict(), os.path.join(save_dir, "model"))
+                state_dict_trans(ac.state_dict(), os.path.join(save_dir, "SAC_Toothless.numpy"))
+                print("Saving model at episode:{}".format(t))
             if (epoch % save_freq == 0) or (epoch == epochs):
                 logger.save_state({'env': env}, None)
 
@@ -431,10 +437,9 @@ def sac(env_fn, actor_critic=MLPActorCritic, ac_kwargs=dict(), seed=0,
 
 if __name__ == '__main__':
     import argparse
-
     parser = argparse.ArgumentParser()
     parser.add_argument('--env', type=str, default="FightingiceDataFrameskip-v0")
-    parser.add_argument('--p2', type=str, default="RHEA_PI")
+    parser.add_argument('--p2', type=str, default="Toothless")
     parser.add_argument('--hid', type=int, default=256)
     parser.add_argument('--l', type=int, default=2)
     parser.add_argument('--gamma', type=float, default=0.99)
@@ -442,8 +447,10 @@ if __name__ == '__main__':
     parser.add_argument('--seed', '-s', type=int, default=0)
     parser.add_argument('--epochs', type=int, default=1000)
     parser.add_argument('--exp_name', type=str, default='sac')
+    parser.add_argument('--save_dir', type=str, default='OpenAI/SAC/')
     args = parser.parse_args()
-
+    if not os.path.exists(args.save_dir):
+        os.makedirs(args.save_dir)
     from spinup.utils.run_utils import setup_logger_kwargs
 
     logger_kwargs = setup_logger_kwargs(args.exp_name, args.seed)
@@ -452,7 +459,7 @@ if __name__ == '__main__':
 
     sac(lambda: make_ftg_ram(args.env, p2=args.p2), actor_critic=MLPActorCritic,
         ac_kwargs=dict(hidden_sizes=[args.hid] * args.l),
-        gamma=args.gamma, seed=args.seed, epochs=args.epochs, steps_per_epoch=4000, replay_size=int(1e6),
+        gamma=args.gamma, seed=args.seed, epochs=args.epochs, steps_per_epoch=1000, replay_size=int(1e6),
         polyak=0.995, lr=args.lr, alpha=0.2, batch_size=128, start_steps=10000,
-        update_after=1000, update_every=100, num_test_episodes=20, max_ep_len=1000,
-        logger_kwargs=logger_kwargs)
+        update_after=1000, update_every=100, num_test_episodes=5, max_ep_len=1000,save_freq=100,
+        logger_kwargs=logger_kwargs, save_dir=args.save_dir)

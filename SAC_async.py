@@ -185,7 +185,7 @@ class ReplayBuffer:
         return {k: torch.as_tensor(v, dtype=torch.float32) for k, v in batch.items()}
 
 
-def sac(global_ac, global_ac_targ, rank, T, args, actor_critic=MLPActorCritic, ac_kwargs=dict(), env =None, p2 =None,seed=0,
+def sac(global_ac, global_ac_targ, rank, T, args,scores, ac_kwargs=dict(), env =None, p2 =None,seed=0,
         steps_per_epoch=4000, epochs=100, replay_size=int(1e6), gamma=0.99,
         polyak=0.995, lr=1e-3, alpha=0.2, batch_size=100, start_steps=10000,
         update_after=1000, update_every=50, max_ep_len=1000,
@@ -196,8 +196,9 @@ def sac(global_ac, global_ac_targ, rank, T, args, actor_critic=MLPActorCritic, a
     env = make_ftg_ram(env, p2=p2)
     obs_dim = env.observation_space.shape[0]
     print("set up child process env")
-    local_ac = actor_critic(env.observation_space, env.action_space, **ac_kwargs)
-    local_ac.load_state_dict(global_ac.state_dict())
+    local_ac = MLPActorCritic(env.observation_space, env.action_space, **ac_kwargs)
+    state_dict = global_ac.state_dict()
+    local_ac.load_state_dict(state_dict)
     print("local ac load global ac")
     # Freeze target networks with respect to optimizers (only update via polyak averaging)
     # Async Version
@@ -217,7 +218,6 @@ def sac(global_ac, global_ac_targ, rank, T, args, actor_critic=MLPActorCritic, a
     total_steps = steps_per_epoch * epochs
     o, ep_ret, ep_len = env.reset(), 0, 0
     discard = False
-    scores = []
     t = T.value()
     # Main loop: collect experience in env and update/log each epoch
     while t <= total_steps:
@@ -284,7 +284,8 @@ def sac(global_ac, global_ac_targ, rank, T, args, actor_critic=MLPActorCritic, a
                 q1_optimizer.step()
                 q2_optimizer.step()
 
-                local_ac.load_state_dict(global_ac.state_dict())
+                state_dict = global_ac.state_dict()
+                local_ac.load_state_dict(state_dict)
 
                 # Finally, update target networks by polyak averaging.
                 with torch.no_grad():
@@ -334,25 +335,24 @@ if __name__ == '__main__':
     print('\nNumber of parameters: \t pi: %d, \t q1: %d, \t q2: %d\n' % var_counts)
 
     # this the kwargs for the single thread version
-    single_version_kwargs = dict(actor_critic=MLPActorCritic,env=args.env,p2=args.p2,
-                                 ac_kwargs=ac_kwargs, gamma=args.gamma, seed=args.seed, epochs=args.epochs,
+    single_version_kwargs = dict(ac_kwargs=ac_kwargs,env=args.env,p2=args.p2, gamma=args.gamma, seed=args.seed, epochs=args.epochs,
                                  steps_per_epoch=1000, replay_size=int(1e6),
                                  polyak=0.995, lr=args.lr, alpha=0.2, batch_size=128, start_steps=10000,
                                  update_after=10000, update_every=500, max_ep_len=1000,
                                  save_freq=5000)
 
     T = Counter()
-    # scores = mp.Manager().list()
+    scores = mp.Manager().list()
     processes = []
     for rank in range(args.n_process):  # + 1 for test process
         # if rank == 0:
             # p = mp.Process(target=test, args=(global_model,))
         # else:
-        p = mp.Process(target=sac, args=(global_ac, global_ac_targ, rank, T, args), kwargs=single_version_kwargs)
+        p = mp.Process(target=sac, args=(global_ac, global_ac_targ, rank, T, args, scores), kwargs=single_version_kwargs)
         p.start()
         processes.append(p)
-    # for p in processes:
-    #     p.join()
+    for p in processes:
+        p.join()
 
 
 
