@@ -12,10 +12,10 @@ def check_args(args):
 			GAME_NUM = int(args[i+1])
 
 def start_game():
-	manager.registerAI(StylizedAI.__class__.__name__, StylizedAI(gateway=gateway,agent_type=1))
+	manager.registerAI(StylizedAI.__class__.__name__, StylizedAI(gateway=gateway, agent_type=2))
 	print("Start game")
 	
-	game = manager.createGame("ZEN", "ZEN", StylizedAI.__class__.__name__, "Toothless", GAME_NUM)
+	game = manager.createGame("ZEN", "ZEN", StylizedAI.__class__.__name__, "ReiwaThunder", GAME_NUM)
 	manager.runGame(game)
 	
 	print("After game")

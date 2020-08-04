@@ -12,7 +12,7 @@ from torch.optim import Adam
 from torch.distributions import Categorical
 from copy import deepcopy
 from OpenAI.atari_wrappers import make_ftg_ram
-from model_parameter_trans import state_dict_trans
+from model_parameter_trans import state_dict_trans,load_trajectory
 
 def combined_shape(length, shape=None):
     if shape is None:
@@ -174,6 +174,10 @@ class ReplayBuffer:
         self.ptr = (self.ptr + 1) % self.max_size
         self.size = min(self.size + 1, self.max_size)
 
+    def store_trajectory(self, trajectory):
+        for i in trajectory:
+            self.store(i["obs"], i["action"], i["reward"], i["next_obs"], i["done"])
+
     def sample_batch(self, batch_size=32):
         idxs = np.random.randint(0, self.size, size=batch_size)
         batch = dict(obs=self.obs_buf[idxs],
@@ -206,6 +210,8 @@ def sac(global_ac, global_ac_targ, rank, T, args,scores, ac_kwargs=dict(), env =
 
     # Experience buffer
     replay_buffer = ReplayBuffer(obs_dim=obs_dim, size=replay_size)
+    if args.traj_dir:
+        replay_buffer.store_trajectory(load_trajectory(args.traj_dir))
 
     # Set up optimizers for policy and q-function
     # Async Version
@@ -308,7 +314,7 @@ if __name__ == '__main__':
     os.environ['MKL_NUM_THREADS'] = '1'
     parser = argparse.ArgumentParser()
     parser.add_argument('--env', type=str, default="FightingiceDataFrameskip-v0")
-    parser.add_argument('--p2', type=str, default="Toothless")
+    parser.add_argument('--p2', type=str, default="ReiwaThunder")
     parser.add_argument('--hid', type=int, default=256)
     parser.add_argument('--l', type=int, default=2)
     parser.add_argument('--gamma', type=float, default=0.99)
@@ -318,6 +324,7 @@ if __name__ == '__main__':
     parser.add_argument('--exp_name', type=str, default='sac')
     parser.add_argument('--n_process', type=int, default=4)
     parser.add_argument('--save-dir', type=str, default="./OpenAI/SAC")
+    parser.add_argument('--traj_dir', type=str, default="./OpenAI/SAC")
     parser.add_argument('--numpy_para', type=str, default="sac.pkl")
     args = parser.parse_args()
     torch.set_num_threads(torch.get_num_threads())
@@ -327,6 +334,10 @@ if __name__ == '__main__':
     ac_kwargs = dict(hidden_sizes=[args.hid] * args.l)
     env = make_ftg_ram(args.env, p2=args.p2)
     global_ac = MLPActorCritic(env.observation_space, env.action_space, **ac_kwargs)
+    if os.path.exists(os.path.join(args.save_dir, "model")):
+        global_ac.load_state_dict(torch.load(os.path.join(args.save_dir, "model")))
+        # state_dict_trans(global_model.state_dict(), os.path.join(save_dir, numpy_para))
+        print("load model")
     global_ac_targ = deepcopy(global_ac)
     env.close()
     del env

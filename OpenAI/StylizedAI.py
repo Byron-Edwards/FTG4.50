@@ -1,4 +1,8 @@
 import random
+import pickle
+import os
+from datetime import datetime
+import numpy as np
 import python.action as pyactions
 from OpenAI.Calculator import Calculator
 import logging
@@ -21,6 +25,14 @@ class StylizedAI(object):
         self.agent_type_strs = ["Aggressive", "Mixing", "Defensive"] # First create three type, later extend to 5
         self.agent_type = agent_type
         self.frameskip = frameskip
+        self.pre_framedata = None
+        self.last_obs = None
+        self.action = None
+        self.reward = None
+        self.done = None
+        self.curr_obs = None
+        self.trajectory = []
+
 
     def agent_type_random(self):
         new_type = random.randint(1,3)
@@ -52,6 +64,17 @@ class StylizedAI(object):
         elif p1hp > p2hp:
             print("Win!, p1hp:{}, p2hp:{}, frame used: {}".format(p1hp, p2hp, frames))
         # self.obs = None
+        self.trajectory[-1] = {"obs": self.last_obs, "action": self.action, "reward": self.reward, "done": True,
+                                   "next_obs": self.curr_obs}
+
+        if not os.path.exists("./ReiwaThunder_buffer"):
+            os.makedirs("./ReiwaThunder_buffer")
+        if p1hp > p2hp:
+            f = open("./ReiwaThunder_buffer/buffer_{}".format(datetime.now().strftime("%Y%m%d-%H%M%S")),"wb")
+            pickle.dump(self.trajectory, f)
+            f.close()
+        self.trajectory = []
+
 
     # Please define this method when you use FightingICE version 4.00 or later
     def getScreenData(self, sd):
@@ -92,7 +115,13 @@ class StylizedAI(object):
             self.cc.skillCancel()
         self.calc = Calculator(self.frameData, self.gameData, self.player, Calculator.NONACT, self.gateway)
         self.get_obs()
+        self.curr_obs = self.get_obs_openai()
+        self.reward = self.get_reward_openai()
+        self.done = False
         action = self.act2()
+        self.action = action
+        if self.last_obs is not None:
+            self.trajectory.append({"obs":self.last_obs,"action":self.action,"reward":self.reward,"done":self.done,"next_obs":self.curr_obs})
         if str(action) == "CROUCH_GUARD":
             action = "1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1"
         elif str(action) == "STAND_GUARD":
@@ -100,6 +129,8 @@ class StylizedAI(object):
         elif str(action) == "AIR_GUARD":
             action = "7 7 7 7 7 7 7 7 7 7 7 7 7 7 7 7 7 7 7 7 7 7 7 7 7 7 7 7 7 7 7 7 7 7 7 7 7 7 7 7 7 7 7 7 7 7 7 7 7"
         self.cc.commandCall(action)
+        self.pre_framedata = self.frameData
+        self.last_obs = self.curr_obs
         print("Stylized AI {} perform ACTION: {}".format(self.agent_type, action))
 
 
@@ -164,6 +195,170 @@ class StylizedAI(object):
         self.oppHitAreaNowRight1 = self.oppProjectiles[1].getCurrentHitArea().getRight() if len(self.oppProjectiles) >= 2 else None  # 960.0
         self.oppHitAreaNowTop1 = self.oppProjectiles[1].getCurrentHitArea().getTop() if len(self.oppProjectiles) >= 2 else None  # 640.0
         self.oppHitAreaNowBottom1 = self.oppProjectiles[1].getCurrentHitArea().getBottom() if len(self.oppProjectiles) >= 2 else None  # 640.0
+
+    def get_obs_openai(self):
+        my = self.frameData.getCharacter(self.player)
+        opp = self.frameData.getCharacter(not self.player)
+
+        # my information
+        myHp = abs(my.getHp() / 400)
+        myEnergy = my.getEnergy() / 300
+        myX = ((my.getLeft() + my.getRight()) / 2) / 960
+        myY = ((my.getBottom() + my.getTop()) / 2) / 640
+        mySpeedX = my.getSpeedX() / 15
+        mySpeedY = my.getSpeedY() / 28
+        myState = my.getAction().ordinal()
+        myRemainingFrame = my.getRemainingFrame() / 70
+
+        # opp information
+        oppHp = abs(opp.getHp() / 400)
+        oppEnergy = opp.getEnergy() / 300
+        oppX = ((opp.getLeft() + opp.getRight()) / 2) / 960
+        oppY = ((opp.getBottom() + opp.getTop()) / 2) / 640
+        oppSpeedX = opp.getSpeedX() / 15
+        oppSpeedY = opp.getSpeedY() / 28
+        oppState = opp.getAction().ordinal()
+        oppRemainingFrame = opp.getRemainingFrame() / 70
+
+        # time information
+        game_frame_num = self.frameData.getFramesNumber() / 3600
+
+        observation = []
+
+        # my information
+        observation.append(myHp)
+        observation.append(myEnergy)
+        observation.append(myX)
+        observation.append(myY)
+        if mySpeedX < 0:
+            observation.append(0)
+        else:
+            observation.append(1)
+        observation.append(abs(mySpeedX))
+        if mySpeedY < 0:
+            observation.append(0)
+        else:
+            observation.append(1)
+        observation.append(abs(mySpeedY))
+        for i in range(56):
+            if i == myState:
+                observation.append(1)
+            else:
+                observation.append(0)
+        observation.append(myRemainingFrame)
+
+        # opp information
+        observation.append(oppHp)
+        observation.append(oppEnergy)
+        observation.append(oppX)
+        observation.append(oppY)
+        if oppSpeedX < 0:
+            observation.append(0)
+        else:
+            observation.append(1)
+        observation.append(abs(oppSpeedX))
+        if oppSpeedY < 0:
+            observation.append(0)
+        else:
+            observation.append(1)
+        observation.append(abs(oppSpeedY))
+        for i in range(56):
+            if i == oppState:
+                observation.append(1)
+            else:
+                observation.append(0)
+        observation.append(oppRemainingFrame)
+
+        # time information
+        observation.append(game_frame_num)
+
+        myProjectiles = self.frameData.getProjectilesByP1()
+        oppProjectiles = self.frameData.getProjectilesByP2()
+
+        if len(myProjectiles) == 2:
+            myHitDamage = myProjectiles[0].getHitDamage() / 200.0
+            myHitAreaNowX = ((myProjectiles[0].getCurrentHitArea().getLeft() + myProjectiles[
+                0].getCurrentHitArea().getRight()) / 2) / 960.0
+            myHitAreaNowY = ((myProjectiles[0].getCurrentHitArea().getTop() + myProjectiles[
+                0].getCurrentHitArea().getBottom()) / 2) / 640.0
+            observation.append(myHitDamage)
+            observation.append(myHitAreaNowX)
+            observation.append(myHitAreaNowY)
+            myHitDamage = myProjectiles[1].getHitDamage() / 200.0
+            myHitAreaNowX = ((myProjectiles[1].getCurrentHitArea().getLeft() + myProjectiles[
+                1].getCurrentHitArea().getRight()) / 2) / 960.0
+            myHitAreaNowY = ((myProjectiles[1].getCurrentHitArea().getTop() + myProjectiles[
+                1].getCurrentHitArea().getBottom()) / 2) / 640.0
+            observation.append(myHitDamage)
+            observation.append(myHitAreaNowX)
+            observation.append(myHitAreaNowY)
+        elif len(myProjectiles) == 1:
+            myHitDamage = myProjectiles[0].getHitDamage() / 200.0
+            myHitAreaNowX = ((myProjectiles[0].getCurrentHitArea().getLeft() + myProjectiles[
+                0].getCurrentHitArea().getRight()) / 2) / 960.0
+            myHitAreaNowY = ((myProjectiles[0].getCurrentHitArea().getTop() + myProjectiles[
+                0].getCurrentHitArea().getBottom()) / 2) / 640.0
+            observation.append(myHitDamage)
+            observation.append(myHitAreaNowX)
+            observation.append(myHitAreaNowY)
+            for t in range(3):
+                observation.append(0.0)
+        else:
+            for t in range(6):
+                observation.append(0.0)
+
+        if len(oppProjectiles) == 2:
+            oppHitDamage = oppProjectiles[0].getHitDamage() / 200.0
+            oppHitAreaNowX = ((oppProjectiles[0].getCurrentHitArea().getLeft() + oppProjectiles[
+                0].getCurrentHitArea().getRight()) / 2) / 960.0
+            oppHitAreaNowY = ((oppProjectiles[0].getCurrentHitArea().getTop() + oppProjectiles[
+                0].getCurrentHitArea().getBottom()) / 2) / 640.0
+            observation.append(oppHitDamage)
+            observation.append(oppHitAreaNowX)
+            observation.append(oppHitAreaNowY)
+            oppHitDamage = oppProjectiles[1].getHitDamage() / 200.0
+            oppHitAreaNowX = ((oppProjectiles[1].getCurrentHitArea().getLeft() + oppProjectiles[
+                1].getCurrentHitArea().getRight()) / 2) / 960.0
+            oppHitAreaNowY = ((oppProjectiles[1].getCurrentHitArea().getTop() + oppProjectiles[
+                1].getCurrentHitArea().getBottom()) / 2) / 640.0
+            observation.append(oppHitDamage)
+            observation.append(oppHitAreaNowX)
+            observation.append(oppHitAreaNowY)
+        elif len(oppProjectiles) == 1:
+            oppHitDamage = oppProjectiles[0].getHitDamage() / 200.0
+            oppHitAreaNowX = ((oppProjectiles[0].getCurrentHitArea().getLeft() + oppProjectiles[
+                0].getCurrentHitArea().getRight()) / 2) / 960.0
+            oppHitAreaNowY = ((oppProjectiles[0].getCurrentHitArea().getTop() + oppProjectiles[
+                0].getCurrentHitArea().getBottom()) / 2) / 640.0
+            observation.append(oppHitDamage)
+            observation.append(oppHitAreaNowX)
+            observation.append(oppHitAreaNowY)
+            for t in range(3):
+                observation.append(0.0)
+        else:
+            for t in range(6):
+                observation.append(0.0)
+
+        observation = np.array(observation, dtype=np.float32)
+        observation = np.clip(observation, 0, 1)
+        return observation
+
+    def get_reward_openai(self):
+        try:
+            if self.pre_framedata.getEmptyFlag() or self.frameData.getEmptyFlag():
+                reward = 0
+            else:
+                p2_hp_pre = self.pre_framedata.getCharacter(False).getHp()
+                p1_hp_pre = self.pre_framedata.getCharacter(True).getHp()
+                p2_hp_now = self.frameData.getCharacter(False).getHp()
+                p1_hp_now = self.frameData.getCharacter(True).getHp()
+                if self.player:
+                    reward = (p2_hp_pre-p2_hp_now) - (p1_hp_pre-p1_hp_now)
+                else:
+                    reward = (p1_hp_pre-p1_hp_now) - (p2_hp_pre-p2_hp_now)
+        except:
+            reward = 0
+        return reward
 
     def act(self):
         # TODO: need to figure out the proper distance to make sure most of the attack could take effect, \
