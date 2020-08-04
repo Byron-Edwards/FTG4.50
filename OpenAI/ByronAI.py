@@ -3,53 +3,6 @@ import pickle
 import os
 from collections import OrderedDict
 
-
-class ActorCriticNumpy:
-
-    class Linear:
-        def __init__(self, weight, bias):
-            self.weight = weight
-            self.bias = bias
-
-        def __call__(self, x):
-            x = np.dot(self.weight, x)
-            x = x + self.bias
-            return x
-
-    @staticmethod
-    def relu(x):
-        return np.maximum(0, x)
-
-    @staticmethod
-    def softmax(x, dim):
-        return np.exp(x) / np.sum(np.exp(x), axis=dim,)
-
-    def __init__(self, state_dict):
-        if isinstance(state_dict, str):
-            f = open(state_dict, "rb")
-            self.state_dict = pickle.load(f)
-            f.close()
-        else:
-            self.state_dict = state_dict
-
-        self.fc1 = self.Linear(self.state_dict["fc1.weight"], self.state_dict["fc1.bias"])
-        self.fc_pi = self.Linear(self.state_dict["fc_pi.weight"], self.state_dict["fc_pi.bias"])
-        self.fc_v = self.Linear(self.state_dict["fc_v.weight"], self.state_dict["fc_v.bias"])
-
-    def pi(self, x, softmax_dim=0):
-        x = x.astype('float64')
-        x = self.relu(self.fc1(x))
-        x = self.fc_pi(x)
-        prob = np.clip(a=self.softmax(x, dim=softmax_dim), a_max=1-1e-20, a_min=1e-20)
-        return prob
-
-    def v(self, x):
-        x = x.astype('float64')
-        x = self.relu(self.fc1(x))
-        v = self.fc_v(x)
-        return v
-
-
 class SACNumpy:
     class Linear:
         def __init__(self, weight, bias):
@@ -110,8 +63,16 @@ class ByronAI(object):
         self.cc = self.gateway.jvm.aiinterface.CommandCenter()
         self.player = player
         self.gameData = gameData
-        self.charaname = str(gameData.getCharacterName(self.player))
         self.oppoAIname = str(gameData.getAiName(not self.player))
+        self.charaname = str(gameData.getCharacterName(self.player))
+        if self.charaname == "ZEN":
+            pass
+        elif self.charaname == "LUD":
+            pass
+        elif self.charaname == "GARNET":
+            pass
+        else:
+            pass
         self.model = SACNumpy(self.parameters)
         self.isGameJustStarted = True
         return 0
@@ -158,7 +119,14 @@ class ByronAI(object):
             self.cc.skillCancel()
 
         action = np.argmax(self.model.pi(self.get_obs()))
-        self.cc.commandCall(self.action_strs[action])
+        action = self.action_strs[action]
+        if str(action) == "CROUCH_GUARD":
+            action = "1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1"
+        elif str(action) == "STAND_GUARD":
+            action = "4 4 4 4 4 4 4 4 4 4 4 4 4 4 4 4 4 4 4 4 4 4 4 4 4 4 4 4 4 4 4 4 4 4 4 4 4 4 4 4 4 4 4 4 4 4 4 4 4"
+        elif str(action) == "AIR_GUARD":
+            action = "7 7 7 7 7 7 7 7 7 7 7 7 7 7 7 7 7 7 7 7 7 7 7 7 7 7 7 7 7 7 7 7 7 7 7 7 7 7 7 7 7 7 7 7 7 7 7 7 7"
+        self.cc.commandCall(action)
         if not self.frameskip:
             self.inputKey = self.cc.getSkillKey()
 

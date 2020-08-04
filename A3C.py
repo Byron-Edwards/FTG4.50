@@ -1,5 +1,6 @@
 import gym
 import gym_fightingice
+import pickle
 import torch
 import os
 import numpy as np
@@ -61,6 +62,52 @@ class ActorCritic(nn.Module):
 
     def v(self, x):
         x = F.relu(self.fc1(x))
+        v = self.fc_v(x)
+        return v
+
+
+class ActorCriticNumpy:
+
+    class Linear:
+        def __init__(self, weight, bias):
+            self.weight = weight
+            self.bias = bias
+
+        def __call__(self, x):
+            x = np.dot(self.weight, x)
+            x = x + self.bias
+            return x
+
+    @staticmethod
+    def relu(x):
+        return np.maximum(0, x)
+
+    @staticmethod
+    def softmax(x, dim):
+        return np.exp(x) / np.sum(np.exp(x), axis=dim,)
+
+    def __init__(self, state_dict):
+        if isinstance(state_dict, str):
+            f = open(state_dict, "rb")
+            self.state_dict = pickle.load(f)
+            f.close()
+        else:
+            self.state_dict = state_dict
+
+        self.fc1 = self.Linear(self.state_dict["fc1.weight"], self.state_dict["fc1.bias"])
+        self.fc_pi = self.Linear(self.state_dict["fc_pi.weight"], self.state_dict["fc_pi.bias"])
+        self.fc_v = self.Linear(self.state_dict["fc_v.weight"], self.state_dict["fc_v.bias"])
+
+    def pi(self, x, softmax_dim=0):
+        x = x.astype('float64')
+        x = self.relu(self.fc1(x))
+        x = self.fc_pi(x)
+        prob = np.clip(a=self.softmax(x, dim=softmax_dim), a_max=1-1e-20, a_min=1e-20)
+        return prob
+
+    def v(self, x):
+        x = x.astype('float64')
+        x = self.relu(self.fc1(x))
         v = self.fc_v(x)
         return v
 
