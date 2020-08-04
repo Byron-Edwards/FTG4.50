@@ -210,8 +210,8 @@ def sac(global_ac, global_ac_targ, rank, T, args,scores, ac_kwargs=dict(), env =
 
     # Experience buffer
     replay_buffer = ReplayBuffer(obs_dim=obs_dim, size=replay_size)
-    if args.traj_dir:
-        replay_buffer.store_trajectory(load_trajectory(args.traj_dir))
+    # if args.traj_dir:
+    #     replay_buffer.store_trajectory(load_trajectory(args.traj_dir))
 
     # Set up optimizers for policy and q-function
     # Async Version
@@ -348,19 +348,23 @@ if __name__ == '__main__':
     print('\nNumber of parameters: \t pi: %d, \t q1: %d, \t q2: %d\n' % var_counts)
 
     # this the kwargs for the single thread version
-    single_version_kwargs = dict(ac_kwargs=ac_kwargs,env=args.env,p2=args.p2, gamma=args.gamma, seed=args.seed, epochs=args.epochs,
-                                 steps_per_epoch=1000, replay_size=int(1e6),
-                                 polyak=0.995, lr=args.lr, alpha=0.2, batch_size=128, start_steps=10000,
-                                 update_after=10000, update_every=10, max_ep_len=500,
-                                 save_freq=1000)
+
 
     T = Counter()
     scores = mp.Manager().list()
     processes = []
+    p2_list = ["ReiwaThunder", "RHEA_PI", "Toothless", "FalzAI"]
     for rank in range(args.n_process):  # + 1 for test process
         # if rank == 0:
             # p = mp.Process(target=test, args=(global_model,))
         # else:
+        p2 = p2_list[rank % len(p2_list)]
+        single_version_kwargs = dict(ac_kwargs=ac_kwargs, env=args.env, p2=p2, gamma=args.gamma, seed=args.seed,
+                                     epochs=args.epochs,
+                                     steps_per_epoch=1000, replay_size=int(1e6),
+                                     polyak=0.995, lr=args.lr, alpha=0.2, batch_size=128, start_steps=10000,
+                                     update_after=10000, update_every=10, max_ep_len=500,
+                                     save_freq=1000)
         p = mp.Process(target=sac, args=(global_ac, global_ac_targ, rank, T, args, scores), kwargs=single_version_kwargs)
         p.start()
         time.sleep(5)
