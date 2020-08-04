@@ -50,16 +50,56 @@ class ActorCriticNumpy:
         return v
 
 
+class SACNumpy:
+    class Linear:
+        def __init__(self, weight, bias):
+            self.weight = weight
+            self.bias = bias
+
+        def __call__(self, x):
+            x = np.dot(self.weight, x)
+            x = x + self.bias
+            return x
+
+    @staticmethod
+    def relu(x):
+        return np.maximum(0, x)
+
+    @staticmethod
+    def softmax(x, dim):
+        return np.exp(x) / np.sum(np.exp(x), axis=dim,)
+
+    def __init__(self, state_dict):
+        if isinstance(state_dict, str):
+            f = open(state_dict, "rb")
+            self.state_dict = pickle.load(f)
+            f.close()
+        else:
+            self.state_dict = state_dict
+
+        self.pi0 = self.Linear(self.state_dict["pi.net.0.weight"], self.state_dict["pi.net.0.bias"])
+        self.pi2 = self.Linear(self.state_dict["pi.net.2.weight"], self.state_dict["pi.net.2.bias"])
+        self.pi4 = self.Linear(self.state_dict["pi.net.4.weight"], self.state_dict["pi.net.4.bias"])
+
+    def pi(self, x, softmax_dim=0):
+        x = x.astype('float64')
+        x = self.relu(self.pi0(x))
+        x = self.relu(self.pi2(x))
+        x = self.pi4(x)
+        prob = np.clip(a=self.softmax(x, dim=softmax_dim), a_max=1-1e-20, a_min=1e-20)
+        return prob
+
+
 class ByronAI(object):
-    def __init__(self, gateway, frameskip=True):
+    def __init__(self, gateway, parametes, frameskip=True):
         self.gateway = gateway
         self.obs = None
         self.just_inited = True
-        MODEL_STATE = "/home/byron/Repos/FTG4.50/OpenAI/ByronAI.numpy"
-        self.model = ActorCriticNumpy(MODEL_STATE)
+        # self.model = ActorCriticNumpy(MODEL_STATE)
         self._actions = "AIR AIR_A AIR_B AIR_D_DB_BA AIR_D_DB_BB AIR_D_DF_FA AIR_D_DF_FB AIR_DA AIR_DB AIR_F_D_DFA AIR_F_D_DFB AIR_FA AIR_FB AIR_GUARD AIR_GUARD_RECOV AIR_RECOV AIR_UA AIR_UB BACK_JUMP BACK_STEP CHANGE_DOWN CROUCH CROUCH_A CROUCH_B CROUCH_FA CROUCH_FB CROUCH_GUARD CROUCH_GUARD_RECOV CROUCH_RECOV DASH DOWN FOR_JUMP FORWARD_WALK JUMP LANDING NEUTRAL RISE STAND STAND_A STAND_B STAND_D_DB_BA STAND_D_DB_BB STAND_D_DF_FA STAND_D_DF_FB STAND_D_DF_FC STAND_F_D_DFA STAND_F_D_DFB STAND_FA STAND_FB STAND_GUARD STAND_GUARD_RECOV STAND_RECOV THROW_A THROW_B THROW_HIT THROW_SUFFER"
         self.action_strs = self._actions.split(" ")
         self.frameskip = frameskip
+        self.parameters = parametes
 
     def close(self):
         pass
@@ -70,6 +110,9 @@ class ByronAI(object):
         self.cc = self.gateway.jvm.aiinterface.CommandCenter()
         self.player = player
         self.gameData = gameData
+        self.charaname = str(gameData.getCharacterName(self.player))
+        self.oppoAIname = str(gameData.getAiName(not self.player))
+        self.model = SACNumpy(self.parameters)
         self.isGameJustStarted = True
         return 0
 
