@@ -15,7 +15,7 @@ def start_game():
 	manager.registerAI(ByronAI.__class__.__name__, ByronAI(gateway=gateway, parametes="../OpenAI/SAC/sac.pkl"))
 	print("Start game")
 	
-	game = manager.createGame("ZEN", "ZEN", ByronAI.__class__.__name__, "ReiwaThunder", GAME_NUM)
+	game = manager.createGame("GARNET", "GARNET", ByronAI.__class__.__name__, "ReiwaThunder", GAME_NUM)
 	manager.runGame(game)
 	
 	print("After game")

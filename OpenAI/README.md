@@ -33,7 +33,7 @@ if the startup script (like `Main_PyAIvsJavaAI.py`) is placed the other place, t
 numpy
 
 ##FUTURE WORK
-The current version is train on the last years winners with character `ZEN`, It might overfit the opponent and the character. Our next work is to make the AI more robust to different style opponents and characters 
+The current version is train with the last years winners, It might overfit the opponent and the character, which means it might master the fight with some specific opponent but not master the fighting itself. Our next work is to make the AI more robust to different style opponents and characters. 
 
 ##CONTACTS
 Please let me know any questions

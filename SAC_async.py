@@ -262,8 +262,8 @@ def sac(global_ac, global_ac_targ, rank, T, args,scores, ac_kwargs=dict(), env =
             # logger.store(EpRet=ep_ret, EpLen=ep_len)
             scores.append(ep_ret)
             m_score = np.mean(scores[-100:])
-            print("Process {}, # of global_steps :{}, round score: {}, mean score : {:.1f}, steps: {}".format(
-                rank, t, ep_ret, m_score, ep_len))
+            print("Process {}, opponent:{},  # of global_steps :{}, round score: {}, mean score : {:.1f}, steps: {}".format(
+                rank, p2, t, ep_ret, m_score, ep_len))
             o, ep_ret, ep_len = env.reset(), 0, 0
             discard = False
 
@@ -353,7 +353,7 @@ if __name__ == '__main__':
     T = Counter()
     scores = mp.Manager().list()
     processes = []
-    p2_list = ["ReiwaThunder", "RHEA_PI", "Toothless", "FalzAI"]
+    p2_list = ["ReiwaThunder", "RHEA_PI", "Toothless", "MctsAi"]
     for rank in range(args.n_process):  # + 1 for test process
         # if rank == 0:
             # p = mp.Process(target=test, args=(global_model,))
