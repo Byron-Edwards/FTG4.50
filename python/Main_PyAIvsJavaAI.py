@@ -1,8 +1,7 @@
 import sys
 from time import sleep
 from py4j.java_gateway import JavaGateway, GatewayParameters, CallbackServerParameters, get_field
-from OpenAI.ByronAI import ByronAI
-from OpenAI.StylizedAI import StylizedAI
+from OpenAI.ButcherPudge import ButcherPudge
 
 # java -cp FightingICE.jar:./lib/lwjgl/*:./lib/natives/linux/*:./lib/*  Main  --mute --grey-bg --limithp 400 400 --py4j --fastmode
 def check_args(args):
@@ -12,10 +11,10 @@ def check_args(args):
 			GAME_NUM = int(args[i+1])
 
 def start_game():
-	manager.registerAI(ByronAI.__class__.__name__, ByronAI(gateway=gateway, parametes="../OpenAI/SAC/sac.pkl"))
+	manager.registerAI(ButcherPudge.__class__.__name__, ButcherPudge(gateway=gateway, para_folder="../OpenAI/ButcherPudge/"))
 	print("Start game")
 	
-	game = manager.createGame("GARNET", "GARNET", ByronAI.__class__.__name__, "ReiwaThunder", GAME_NUM)
+	game = manager.createGame("ZEN", "ZEN", ButcherPudge.__class__.__name__, "ReiwaThunder", GAME_NUM)
 	manager.runGame(game)
 	
 	print("After game")

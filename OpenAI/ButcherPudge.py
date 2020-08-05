@@ -43,7 +43,7 @@ class SACNumpy:
         return prob
 
 
-class ByronAI(object):
+class ButcherPudge(object):
     def __init__(self, gateway, parametes, frameskip=True):
         self.gateway = gateway
         self.obs = None
@@ -66,14 +66,13 @@ class ByronAI(object):
         self.oppoAIname = str(gameData.getAiName(not self.player))
         self.charaname = str(gameData.getCharacterName(self.player))
         if self.charaname == "ZEN":
-            pass
+            self.model = SACNumpy("/home/byron/Repos/FTG4.50/OpenAI/SAC/sac_ZEN.pkl")
         elif self.charaname == "LUD":
-            pass
+            self.model = SACNumpy("/home/byron/Repos/FTG4.50/OpenAI/SAC/sac_LUD.pkl")
         elif self.charaname == "GARNET":
-            pass
+            self.model = SACNumpy("/home/byron/Repos/FTG4.50/OpenAI/SAC/sac_GARNET.pkl")
         else:
-            pass
-        self.model = SACNumpy(self.parameters)
+            self.model = SACNumpy(self.parameters)
         self.isGameJustStarted = True
         return 0
 
@@ -120,6 +119,7 @@ class ByronAI(object):
 
         action = np.argmax(self.model.pi(self.get_obs()))
         action = self.action_strs[action]
+        # The following code is just make sure the guard action would take effect, otherwise during training the agent will ignore the guard action as it take no effect
         if str(action) == "CROUCH_GUARD":
             action = "1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1"
         elif str(action) == "STAND_GUARD":
