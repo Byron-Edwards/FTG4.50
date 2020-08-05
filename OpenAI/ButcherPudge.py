@@ -3,6 +3,7 @@ import pickle
 import os
 from collections import OrderedDict
 
+
 class SACNumpy:
     class Linear:
         def __init__(self, weight, bias):
@@ -44,15 +45,14 @@ class SACNumpy:
 
 
 class ButcherPudge(object):
-    def __init__(self, gateway, parametes, frameskip=True):
+    def __init__(self, gateway, para_folder):
         self.gateway = gateway
         self.obs = None
         self.just_inited = True
-        # self.model = ActorCriticNumpy(MODEL_STATE)
         self._actions = "AIR AIR_A AIR_B AIR_D_DB_BA AIR_D_DB_BB AIR_D_DF_FA AIR_D_DF_FB AIR_DA AIR_DB AIR_F_D_DFA AIR_F_D_DFB AIR_FA AIR_FB AIR_GUARD AIR_GUARD_RECOV AIR_RECOV AIR_UA AIR_UB BACK_JUMP BACK_STEP CHANGE_DOWN CROUCH CROUCH_A CROUCH_B CROUCH_FA CROUCH_FB CROUCH_GUARD CROUCH_GUARD_RECOV CROUCH_RECOV DASH DOWN FOR_JUMP FORWARD_WALK JUMP LANDING NEUTRAL RISE STAND STAND_A STAND_B STAND_D_DB_BA STAND_D_DB_BB STAND_D_DF_FA STAND_D_DF_FB STAND_D_DF_FC STAND_F_D_DFA STAND_F_D_DFB STAND_FA STAND_FB STAND_GUARD STAND_GUARD_RECOV STAND_RECOV THROW_A THROW_B THROW_HIT THROW_SUFFER"
         self.action_strs = self._actions.split(" ")
-        self.frameskip = frameskip
-        self.parameters = parametes
+        self.frameskip = True
+        self.para_folder = para_folder
 
     def close(self):
         pass
@@ -66,13 +66,22 @@ class ButcherPudge(object):
         self.oppoAIname = str(gameData.getAiName(not self.player))
         self.charaname = str(gameData.getCharacterName(self.player))
         if self.charaname == "ZEN":
-            self.model = SACNumpy("/home/byron/Repos/FTG4.50/OpenAI/SAC/sac_ZEN.pkl")
+            if self.oppoAIname == "MctsAi":
+                self.model = SACNumpy(os.path.join(self.para_folder, "sac_ZEN_speed.pkl"))
+            else:
+                self.model = SACNumpy(os.path.join(self.para_folder, "sac_ZEN.pkl"))
         elif self.charaname == "LUD":
-            self.model = SACNumpy("/home/byron/Repos/FTG4.50/OpenAI/SAC/sac_LUD.pkl")
+            if self.oppoAIname == "MctsAi":
+                self.model = SACNumpy(os.path.join(self.para_folder, "sac_LUD_speed.pkl"))
+            else:
+                self.model = SACNumpy(os.path.join(self.para_folder, "sac_LUD.pkl"))
         elif self.charaname == "GARNET":
-            self.model = SACNumpy("/home/byron/Repos/FTG4.50/OpenAI/SAC/sac_GARNET.pkl")
+            if self.oppoAIname == "MctsAi":
+                self.model = SACNumpy(os.path.join(self.para_folder, "sac_GARNET_speed.pkl"))
+            else:
+                self.model = SACNumpy(os.path.join(self.para_folder, "sac_GARNET.pkl"))
         else:
-            self.model = SACNumpy(self.parameters)
+            self.model = SACNumpy(os.path.join(self.para_folder, "sac_ZEN.pkl"))
         self.isGameJustStarted = True
         return 0
 
@@ -119,7 +128,6 @@ class ButcherPudge(object):
 
         action = np.argmax(self.model.pi(self.get_obs()))
         action = self.action_strs[action]
-        # The following code is just make sure the guard action would take effect, otherwise during training the agent will ignore the guard action as it take no effect
         if str(action) == "CROUCH_GUARD":
             action = "1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1"
         elif str(action) == "STAND_GUARD":
@@ -130,6 +138,7 @@ class ButcherPudge(object):
         if not self.frameskip:
             self.inputKey = self.cc.getSkillKey()
 
+    # Same as gym_ai.py
     def get_obs(self):
         my = self.frameData.getCharacter(self.player)
         opp = self.frameData.getCharacter(not self.player)

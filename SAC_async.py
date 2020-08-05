@@ -322,7 +322,7 @@ if __name__ == '__main__':
     parser.add_argument('--seed', '-s', type=int, default=0)
     parser.add_argument('--epochs', type=int, default=10000)
     parser.add_argument('--exp_name', type=str, default='sac')
-    parser.add_argument('--n_process', type=int, default=4)
+    parser.add_argument('--n_process', type=int, default=6)
     parser.add_argument('--save-dir', type=str, default="./OpenAI/SAC")
     parser.add_argument('--traj_dir', type=str, default="./OpenAI/SAC")
     parser.add_argument('--numpy_para', type=str, default="sac.pkl")
@@ -353,7 +353,7 @@ if __name__ == '__main__':
     T = Counter()
     scores = mp.Manager().list()
     processes = []
-    p2_list = ["ReiwaThunder", "RHEA_PI", "Toothless", "MctsAi"]
+    p2_list = ["MctsAi", "MctsAi", "MctsAi", "MctsAi", "MctsAi"]
     for rank in range(args.n_process):  # + 1 for test process
         # if rank == 0:
             # p = mp.Process(target=test, args=(global_model,))
@@ -362,8 +362,8 @@ if __name__ == '__main__':
         single_version_kwargs = dict(ac_kwargs=ac_kwargs, env=args.env, p2=p2, gamma=args.gamma, seed=args.seed,
                                      epochs=args.epochs,
                                      steps_per_epoch=1000, replay_size=int(1e6),
-                                     polyak=0.995, lr=args.lr, alpha=0.2, batch_size=128, start_steps=10000,
-                                     update_after=10000, update_every=10, max_ep_len=500,
+                                     polyak=0.995, lr=args.lr, alpha=0.2, batch_size=128, start_steps=1000,
+                                     update_after=10000, update_every=1, max_ep_len=500,
                                      save_freq=1000)
         p = mp.Process(target=sac, args=(global_ac, global_ac_targ, rank, T, args, scores), kwargs=single_version_kwargs)
         p.start()
