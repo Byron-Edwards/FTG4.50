@@ -3,6 +3,7 @@ import os
 os.environ.setdefault('PATH', '')
 from collections import deque
 import gym
+
 import gym_fightingice
 import signal
 from gym import spaces
@@ -401,7 +402,63 @@ class FTGWrapper(gym.Wrapper):
         # if info.get('isControl', True):
         if info.get('no_data_receive', False):
             self.env.close()
-            done = True
+            done = False
+        return ob, reward, done, info
+
+
+class FTGNonstationWrapper(gym.Wrapper):
+    def __init__(self, env, p2_list, total_episode=1000):
+        gym.Wrapper.__init__(self, env)
+        self.p2_list = p2_list
+        self.shuffled_p2 = self.p2_list
+        self.total_episode = total_episode
+        self.current_episode = 1
+        self.p2_num = len(self.p2_list)
+        self.p2 = None
+        self.create_order()
+
+    def create_order(self):
+        np.random.shuffle(self.shuffled_p2)
+        self.p2 = self.shuffled_p2[0]
+        random_list = np.random.uniform(0, 1, self.p2_num)
+        random_list = (random_list / np.sum(random_list) * self.total_episode).astype("int")
+        random_list[-1] += self.total_episode - np.sum(random_list)
+        self.random_list = random_list
+        print("Shuffled p2 list: {} \n p2_counters:{}".format(self.shuffled_p2, self.random_list))
+
+    def reset(self):
+        if self.current_episode >= np.sum(self.random_list):
+            self.current_episode = 1
+            self.create_order()
+        for index, p2 in enumerate(self.shuffled_p2):
+            if self.current_episode <= np.sum(self.random_list[0:index + 1]):
+                if self.p2 != p2:
+                    # need to close the env otherwise the p2 will not be changed.
+                    self.env.close()
+                self.p2 = p2
+                break
+        print("current p2: {}, current episode: {}".format(self.p2, self.current_episode))
+        while True:
+            try:
+                with timeout(seconds=30):
+                    s = self.env.reset(p2=self.p2)
+                    if isinstance(s, list):
+                        continue
+                    if isinstance(s, np.ndarray):
+                        self.current_episode += 1
+                        break
+            except TimeoutError:
+                print("Time out to reset env")
+                self.env.close()
+                continue
+        return s
+
+    def step(self, action):
+        ob, reward, done, info = self.env.step(action)
+        # if info.get('isControl', True):
+        if info.get('no_data_receive', False):
+            self.env.close()
+            done = False
         return ob, reward, done, info
 
 
@@ -419,4 +476,13 @@ def make_ftg_ram(env_name, p2, port=None, java_env_path="."):
     else:
         env = gym.make(env_name, java_env_path=java_env_path, port=port)
     env = FTGWrapper(env, p2)
+    return env
+
+
+def make_ftg_ram_nonstation(env_name, p2_list, total_episode=1000, port=None, java_env_path="."):
+    if port is None:
+        env = gym.make(env_name, java_env_path=java_env_path)
+    else:
+        env = gym.make(env_name, java_env_path=java_env_path, port=port)
+    env = FTGNonstationWrapper(env, p2_list, total_episode)
     return env
