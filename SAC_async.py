@@ -70,13 +70,9 @@ class Critic(nn.Module):
 
 
 class MLPActorCritic(nn.Module):
-    def __init__(self, observation_space, action_space, hidden_sizes=(256,256),
+    def __init__(self,obs_dim, act_dim, hidden_sizes=(256, 256),
                  activation=nn.ReLU):
         super().__init__()
-
-        obs_dim = observation_space.shape[0]
-        act_dim = action_space.n
-        # act_limit = action_space.high[0]
 
         # build policy and value functions
         self.pi = Actor(obs_dim, act_dim, hidden_sizes, activation)
@@ -120,11 +116,11 @@ class MLPActorCritic(nn.Module):
 
         # Entropy-regularized policy loss
         loss_pi = (a_prob * (alpha * log_a_prob - q_pi)).mean()
-        entropy = torch.sum(log_a_prob * a_prob, dim=1).detach()
+        entropy = torch.sum(log_a_prob * a_prob, dim=1)
 
         # Useful info for logging
-        pi_info = dict(LogPi=entropy.numpy())
-        return loss_pi, pi_info
+        # pi_info = dict(LogPi=entropy.numpy())
+        return loss_pi, entropy
 
     def act(self, obs):
         with torch.no_grad():
@@ -191,18 +187,19 @@ class ReplayBuffer:
 def sac(global_ac, global_ac_targ, rank, T, args,scores, ac_kwargs=dict(), env =None, p2 =None,seed=0,
         steps_per_epoch=4000, epochs=100, replay_size=int(1e6), gamma=0.99,
         polyak=0.995, lr=1e-3, alpha=0.2, batch_size=100, start_steps=10000,
-        update_after=1000, update_every=50, max_ep_len=1000,
-        save_freq=1):
+        update_after=1000, update_every=50, max_ep_len=1000,save_freq=1):
     torch.manual_seed(seed + rank)
     np.random.seed(seed + rank)
-
+    # env = gym.make(env)
     env = make_ftg_ram(env, p2=p2)
     obs_dim = env.observation_space.shape[0]
+    act_dim = env.action_space.n
     print("set up child process env")
-    local_ac = MLPActorCritic(env.observation_space, env.action_space, **ac_kwargs)
+    local_ac = MLPActorCritic(obs_dim, act_dim, **ac_kwargs)
     state_dict = global_ac.state_dict()
     local_ac.load_state_dict(state_dict)
     print("local ac load global ac")
+
     # Freeze target networks with respect to optimizers (only update via polyak averaging)
     # Async Version
     for p in global_ac_targ.parameters():
@@ -213,11 +210,17 @@ def sac(global_ac, global_ac_targ, rank, T, args,scores, ac_kwargs=dict(), env =
     # if args.traj_dir:
     #     replay_buffer.store_trajectory(load_trajectory(args.traj_dir))
 
+    # Entropy Tuning
+    target_entropy = -torch.prod(torch.Tensor(env.action_space.shape)).item()  # heuristic value from the paper
+    log_alpha = torch.zeros(1, requires_grad=True)
+    alpha = log_alpha.exp()
+
     # Set up optimizers for policy and q-function
     # Async Version
     pi_optimizer = Adam(global_ac.pi.parameters(), lr=lr)
     q1_optimizer = Adam(global_ac.q1.parameters(), lr=lr)
     q2_optimizer = Adam(global_ac.q2.parameters(), lr=lr)
+    alpha_optim = Adam([log_alpha], lr=lr, eps=1e-4)
 
     # Prepare for interaction with environment
     total_steps = steps_per_epoch * epochs
@@ -262,15 +265,15 @@ def sac(global_ac, global_ac_targ, rank, T, args,scores, ac_kwargs=dict(), env =
             # logger.store(EpRet=ep_ret, EpLen=ep_len)
             scores.append(ep_ret)
             m_score = np.mean(scores[-100:])
-            print("Process {}, opponent:{},  # of global_steps :{}, round score: {}, mean score : {:.1f}, steps: {}".format(
-                rank, p2, t, ep_ret, m_score, ep_len))
+            print("Process {}, opponent:{},  # of global_steps :{}, round score: {}, mean score : {:.1f}, steps: {}, alpha: {}".format(
+                rank, p2, t, ep_ret, m_score, ep_len, alpha.item()))
             o, ep_ret, ep_len = env.reset(), 0, 0
             discard = False
 
         # Update handling
         if t >= update_after and t % update_every == 0:
-            print("update network")
             for j in range(update_every):
+
                 batch = replay_buffer.sample_batch(batch_size)
                 # First run one gradient descent step for Q1 and Q2
                 q1_optimizer.zero_grad()
@@ -280,15 +283,21 @@ def sac(global_ac, global_ac_targ, rank, T, args,scores, ac_kwargs=dict(), env =
 
                 # Next run one gradient descent step for pi.
                 pi_optimizer.zero_grad()
-                loss_pi, pi_info = local_ac.compute_loss_pi(batch, alpha)
+                loss_pi, entropy = local_ac.compute_loss_pi(batch, alpha)
                 loss_pi.backward()
 
                 for global_param, local_param in zip(global_ac.parameters(), local_ac.parameters()):
                     global_param._grad = local_param.grad
 
+                alpha_optim.zero_grad()
+                alpha_loss = -(log_alpha * (entropy + target_entropy).detach()).mean()
+                alpha = log_alpha.exp()
+                alpha_loss.backward(retain_graph=False)
+
                 pi_optimizer.step()
                 q1_optimizer.step()
                 q2_optimizer.step()
+                alpha_optim.step()
 
                 state_dict = global_ac.state_dict()
                 local_ac.load_state_dict(state_dict)
@@ -313,6 +322,7 @@ if __name__ == '__main__':
     os.environ['OMP_NUM_THREADS'] = '1'
     os.environ['MKL_NUM_THREADS'] = '1'
     parser = argparse.ArgumentParser()
+    # parser.add_argument('--env', type=str, default="CartPole-v0")
     parser.add_argument('--env', type=str, default="FightingiceDataFrameskip-v0")
     parser.add_argument('--p2', type=str, default="ReiwaThunder")
     parser.add_argument('--hid', type=int, default=256)
@@ -332,7 +342,8 @@ if __name__ == '__main__':
         os.makedirs(args.save_dir)
 
     ac_kwargs = dict(hidden_sizes=[args.hid] * args.l)
-    env = make_ftg_ram(args.env, p2=args.p2)
+    env = gym.make(args.env)
+    # env = make_ftg_ram(args.env, p2=args.p2)
     global_ac = MLPActorCritic(env.observation_space, env.action_space, **ac_kwargs)
     if os.path.exists(os.path.join(args.save_dir, "model")):
         global_ac.load_state_dict(torch.load(os.path.join(args.save_dir, "model")))
