@@ -100,11 +100,7 @@ class MLPActorCritic(nn.Module):
         loss_q2 = F.mse_loss(q2, backup.unsqueeze(-1))
         loss_q = loss_q1 + loss_q2
 
-        # Useful info for logging
-        q_info = dict(Q1Vals=q1.detach().numpy(),
-                      Q2Vals=q2.detach().numpy())
-
-        return loss_q, q_info
+        return loss_q
 
     # Set up function for computing SAC pi loss
     def compute_loss_pi(self, data, alpha):
@@ -127,10 +123,10 @@ class MLPActorCritic(nn.Module):
             a_prob = self.pi(obs)
             return a_prob
 
-    def get_action(self, o, greedy=False):
+    def get_action(self, o, greedy=False, device=None):
         if len(o.shape) == 1:
             o = np.expand_dims(o, axis=0)
-        a_prob = self.act(torch.as_tensor(o, dtype=torch.float32))
+        a_prob = self.act(torch.as_tensor(o, dtype=torch.float32, device=device))
         a_prob, log_a_prob, sample_a, max_a = self.get_actions_info(a_prob)
         action = sample_a if not greedy else max_a
         return action.item()
@@ -174,20 +170,20 @@ class ReplayBuffer:
         for i in trajectory:
             self.store(i["obs"], i["action"], i["reward"], i["next_obs"], i["done"])
 
-    def sample_batch(self, batch_size=32):
+    def sample_batch(self, batch_size=32,device=None):
         idxs = np.random.randint(0, self.size, size=batch_size)
         batch = dict(obs=self.obs_buf[idxs],
                      obs2=self.obs2_buf[idxs],
                      act=self.act_buf[idxs],
                      rew=self.rew_buf[idxs],
                      done=self.done_buf[idxs])
-        return {k: torch.as_tensor(v, dtype=torch.float32) for k, v in batch.items()}
+        return {k: torch.as_tensor(v, dtype=torch.float32).to(device) for k, v in batch.items()}
 
 
 def sac(global_ac, global_ac_targ, rank, T, args,scores, ac_kwargs=dict(), env =None, p2 =None,seed=0,
         steps_per_epoch=4000, epochs=100, replay_size=int(1e6), gamma=0.99,
         polyak=0.995, lr=1e-3, alpha=0.2, batch_size=100, start_steps=10000,
-        update_after=1000, update_every=50, max_ep_len=1000,save_freq=1):
+        update_after=1000, update_every=50, max_ep_len=1000,save_freq=1,device=None):
     torch.manual_seed(seed + rank)
     np.random.seed(seed + rank)
     # env = gym.make(env)
@@ -195,7 +191,7 @@ def sac(global_ac, global_ac_targ, rank, T, args,scores, ac_kwargs=dict(), env =
     obs_dim = env.observation_space.shape[0]
     act_dim = env.action_space.n
     print("set up child process env")
-    local_ac = MLPActorCritic(obs_dim, act_dim, **ac_kwargs)
+    local_ac = MLPActorCritic(obs_dim, act_dim, **ac_kwargs).to(device)
     state_dict = global_ac.state_dict()
     local_ac.load_state_dict(state_dict)
     print("local ac load global ac")
@@ -211,9 +207,9 @@ def sac(global_ac, global_ac_targ, rank, T, args,scores, ac_kwargs=dict(), env =
     #     replay_buffer.store_trajectory(load_trajectory(args.traj_dir))
 
     # Entropy Tuning
-    target_entropy = -torch.prod(torch.Tensor(env.action_space.shape)).item()  # heuristic value from the paper
-    log_alpha = torch.zeros(1, requires_grad=True)
-    alpha = log_alpha.exp()
+    target_entropy = -torch.prod(torch.Tensor(env.action_space.shape).to(device)).item()  # heuristic value from the paper
+    log_alpha = torch.zeros(1, requires_grad=True, device=device)
+    alpha = log_alpha.exp().to(device)
 
     # Set up optimizers for policy and q-function
     # Async Version
@@ -234,7 +230,7 @@ def sac(global_ac, global_ac_targ, rank, T, args,scores, ac_kwargs=dict(), env =
         # from a uniform distribution for better exploration. Afterwards,
         # use the learned policy.
         if t > start_steps:
-            a = local_ac.get_action(o)
+            a = local_ac.get_action(o, device=device)
         else:
             a = env.action_space.sample()
 
@@ -274,11 +270,11 @@ def sac(global_ac, global_ac_targ, rank, T, args,scores, ac_kwargs=dict(), env =
         if t >= update_after and t % update_every == 0:
             for j in range(update_every):
 
-                batch = replay_buffer.sample_batch(batch_size)
+                batch = replay_buffer.sample_batch(batch_size,device=device)
                 # First run one gradient descent step for Q1 and Q2
                 q1_optimizer.zero_grad()
                 q2_optimizer.zero_grad()
-                loss_q, q_info = local_ac.compute_loss_q(batch, global_ac_targ, gamma, alpha)
+                loss_q = local_ac.compute_loss_q(batch, global_ac_targ, gamma, alpha)
                 loss_q.backward()
 
                 # Next run one gradient descent step for pi.
@@ -291,7 +287,7 @@ def sac(global_ac, global_ac_targ, rank, T, args,scores, ac_kwargs=dict(), env =
 
                 alpha_optim.zero_grad()
                 alpha_loss = -(log_alpha * (entropy + target_entropy).detach()).mean()
-                alpha = log_alpha.exp()
+                alpha = log_alpha.exp().to(device)
                 alpha_loss.backward(retain_graph=False)
 
                 pi_optimizer.step()
@@ -326,6 +322,7 @@ if __name__ == '__main__':
     parser.add_argument('--env', type=str, default="FightingiceDataFrameskip-v0")
     parser.add_argument('--p2', type=str, default="ReiwaThunder")
     parser.add_argument('--hid', type=int, default=256)
+    parser.add_argument('--cuda', type=bool, default=True)
     parser.add_argument('--l', type=int, default=2)
     parser.add_argument('--gamma', type=float, default=0.99)
     parser.add_argument('--lr', type=float, default=1e-4)
@@ -342,9 +339,12 @@ if __name__ == '__main__':
         os.makedirs(args.save_dir)
 
     ac_kwargs = dict(hidden_sizes=[args.hid] * args.l)
+    device = torch.device("cuda") if args.cuda else torch.device("cpu")
     env = gym.make(args.env)
+    obs_dim = env.observation_space.shape[0]
+    act_dim = env.action_space.n
     # env = make_ftg_ram(args.env, p2=args.p2)
-    global_ac = MLPActorCritic(env.observation_space, env.action_space, **ac_kwargs)
+    global_ac = MLPActorCritic(obs_dim, act_dim, **ac_kwargs)
     if os.path.exists(os.path.join(args.save_dir, "model")):
         global_ac.load_state_dict(torch.load(os.path.join(args.save_dir, "model")))
         # state_dict_trans(global_model.state_dict(), os.path.join(save_dir, numpy_para))
@@ -354,7 +354,9 @@ if __name__ == '__main__':
     del env
     global_ac.share_memory()
     global_ac_targ.share_memory()
-
+    if args.cuda:
+        global_ac.to(device)
+        global_ac_targ.to(device)
     var_counts = tuple(count_vars(module) for module in [global_ac.pi, global_ac.q1, global_ac.q2])
     print('\nNumber of parameters: \t pi: %d, \t q1: %d, \t q2: %d\n' % var_counts)
 
@@ -375,7 +377,7 @@ if __name__ == '__main__':
                                      steps_per_epoch=1000, replay_size=int(1e6),
                                      polyak=0.995, lr=args.lr, alpha=0.2, batch_size=128, start_steps=1000,
                                      update_after=10000, update_every=1, max_ep_len=500,
-                                     save_freq=1000)
+                                     save_freq=1000,device=device)
         p = mp.Process(target=sac, args=(global_ac, global_ac_targ, rank, T, args, scores), kwargs=single_version_kwargs)
         p.start()
         time.sleep(5)
