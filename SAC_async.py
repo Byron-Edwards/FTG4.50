@@ -11,7 +11,9 @@ import torch.multiprocessing as mp
 from torch.optim import Adam
 from torch.distributions import Categorical
 from copy import deepcopy
-from OpenAI.atari_wrappers import make_ftg_ram
+# from tensorboardX import GlobalSummaryWriter
+from torch.utils.tensorboard import SummaryWriter
+from OpenAI.atari_wrappers import make_ftg_ram,make_ftg_ram_nonstation
 from model_parameter_trans import state_dict_trans,load_trajectory
 
 def combined_shape(length, shape=None):
@@ -180,14 +182,20 @@ class ReplayBuffer:
         return {k: torch.as_tensor(v, dtype=torch.float32).to(device) for k, v in batch.items()}
 
 
-def sac(global_ac, global_ac_targ, rank, T, args,scores, ac_kwargs=dict(), env =None, p2 =None,seed=0,
-        steps_per_epoch=4000, epochs=100, replay_size=int(1e6), gamma=0.99,
-        polyak=0.995, lr=1e-3, alpha=0.2, batch_size=100, start_steps=10000,
-        update_after=1000, update_every=50, max_ep_len=1000,save_freq=1,device=None):
+def sac(global_ac, global_ac_targ, rank, T, E, args, scores, win_rate, ac_kwargs=dict(), env=None, p2=None, seed=0,
+        total_episode=100, replay_size=int(1e6), gamma=0.99,
+        polyak=0.995, lr=1e-3, min_alpha=0.2, batch_size=100, start_steps=10000,
+        update_after=1000, update_every=50, max_ep_len=1000, save_freq=1, device=None, tensorboard_dir=None, p2_list= None):
     torch.manual_seed(seed + rank)
     np.random.seed(seed + rank)
-    # env = gym.make(env)
-    env = make_ftg_ram(env, p2=p2)
+    # writer = GlobalSummaryWriter.getSummaryWriter()
+    tensorboard_dir = os.path.join(tensorboard_dir, str(rank))
+    if not os.path.exists(tensorboard_dir):
+        os.makedirs(tensorboard_dir)
+    writer = SummaryWriter(log_dir=tensorboard_dir)
+    # env = gym.make(args.env)
+    # env = make_ftg_ram(args.env, p2=args.p2)
+    env = make_ftg_ram_nonstation(args.env, p2_list=p2_list, total_episode=100)
     obs_dim = env.observation_space.shape[0]
     act_dim = env.action_space.n
     print("set up child process env")
@@ -219,12 +227,12 @@ def sac(global_ac, global_ac_targ, rank, T, args,scores, ac_kwargs=dict(), env =
     alpha_optim = Adam([log_alpha], lr=lr, eps=1e-4)
 
     # Prepare for interaction with environment
-    total_steps = steps_per_epoch * epochs
     o, ep_ret, ep_len = env.reset(), 0, 0
     discard = False
     t = T.value()
+    e = E.value()
     # Main loop: collect experience in env and update/log each epoch
-    while t <= total_steps:
+    while e <= total_episode:
 
         # Until start_steps have elapsed, randomly sample actions
         # from a uniform distribution for better exploration. Afterwards,
@@ -258,11 +266,18 @@ def sac(global_ac, global_ac_targ, rank, T, args,scores, ac_kwargs=dict(), env =
 
         # End of trajectory handling
         if d or (ep_len == max_ep_len) or discard:
+            E.increment()
+            e = E.value()
             # logger.store(EpRet=ep_ret, EpLen=ep_len)
             scores.append(ep_ret)
             m_score = np.mean(scores[-100:])
-            print("Process {}, opponent:{},  # of global_steps :{}, round score: {}, mean score : {:.1f}, steps: {}, alpha: {}".format(
-                rank, p2, t, ep_ret, m_score, ep_len, alpha.item()))
+            print(
+                "Process {}, opponent:{}, # of global_episode :{},  # of global_steps :{}, round score: {}, mean score : {:.1f}, steps: {}, alpha: {}".format(
+                    rank, p2, e, t, ep_ret, m_score, ep_len, alpha.item()))
+            writer.add_scalar("metrics/round_score", ep_ret, e)
+            writer.add_scalar("metrics/mean_score", m_score.item(), e)
+            writer.add_scalar("metrics/round_step", ep_len, e)
+            writer.add_scalar("metrics/alpha", alpha, e)
             o, ep_ret, ep_len = env.reset(), 0, 0
             discard = False
 
@@ -287,8 +302,9 @@ def sac(global_ac, global_ac_targ, rank, T, args,scores, ac_kwargs=dict(), env =
 
                 alpha_optim.zero_grad()
                 alpha_loss = -(log_alpha * (entropy + target_entropy).detach()).mean()
-                alpha = log_alpha.exp().to(device)
                 alpha_loss.backward(retain_graph=False)
+                alpha = log_alpha.exp().to(device)
+                # alpha = max(log_alpha.exp().item(), min_alpha)
 
                 pi_optimizer.step()
                 q1_optimizer.step()
@@ -303,20 +319,18 @@ def sac(global_ac, global_ac_targ, rank, T, args,scores, ac_kwargs=dict(), env =
                     for p, p_targ in zip(global_ac.parameters(), global_ac_targ.parameters()):
                         p_targ.data.copy_((1 - polyak) * p.data + polyak * p_targ.data)
 
-        # End of epoch handling
-        if (t + 1) % steps_per_epoch == 0:
-            epoch = (t + 1) // steps_per_epoch
-            print("Epoch: {}".format(epoch))
+                writer.add_scalar("training/pi_loss", loss_pi.detach().item(),t)
+                writer.add_scalar("training/q_loss", loss_q.detach().item(),t)
+                writer.add_scalar("training/alpha_loss", alpha_loss.detach().item(),t)
+                writer.add_scalar("training/entropy", entropy.detach().mean().item(),t)
+
         if t % save_freq == 0 and t > 0:
-            torch.save(global_ac.state_dict(), os.path.join(args.save_dir, "model"))
+            torch.save(global_ac.state_dict(), os.path.join(args.save_dir, args.model_para))
             state_dict_trans(global_ac.state_dict(), os.path.join(args.save_dir, args.numpy_para))
             print("Saving model at episode:{}".format(t))
 
 
 if __name__ == '__main__':
-    mp.set_start_method("forkserver")
-    os.environ['OMP_NUM_THREADS'] = '1'
-    os.environ['MKL_NUM_THREADS'] = '1'
     parser = argparse.ArgumentParser()
     # parser.add_argument('--env', type=str, default="CartPole-v0")
     parser.add_argument('--env', type=str, default="FightingiceDataFrameskip-v0")
@@ -327,26 +341,38 @@ if __name__ == '__main__':
     parser.add_argument('--gamma', type=float, default=0.99)
     parser.add_argument('--lr', type=float, default=1e-4)
     parser.add_argument('--seed', '-s', type=int, default=0)
-    parser.add_argument('--epochs', type=int, default=10000)
-    parser.add_argument('--exp_name', type=str, default='sac')
-    parser.add_argument('--n_process', type=int, default=6)
-    parser.add_argument('--save-dir', type=str, default="./OpenAI/SAC")
-    parser.add_argument('--traj_dir', type=str, default="./OpenAI/SAC")
-    parser.add_argument('--numpy_para', type=str, default="sac.pkl")
+    parser.add_argument('--episode', type=int, default=100000)
+    parser.add_argument('--exp_name', type=str, default='non_stationary')
+    parser.add_argument('--n_process', type=int, default=5)
+    parser.add_argument('--save-dir', type=str, default="./experiments")
+    parser.add_argument('--traj_dir', type=str, default="./experiments")
+    parser.add_argument('--model_para', type=str, default="non_stationary.torch")
+    parser.add_argument('--numpy_para', type=str, default="non_stationary.numpy")
     args = parser.parse_args()
+
+    # Basic Settings
+    mp.set_start_method("forkserver")
+    os.environ['OMP_NUM_THREADS'] = '1'
+    os.environ['MKL_NUM_THREADS'] = '1'
     torch.set_num_threads(torch.get_num_threads())
     if not os.path.exists(args.save_dir):
         os.makedirs(args.save_dir)
-
-    ac_kwargs = dict(hidden_sizes=[args.hid] * args.l)
+    tensorboard_dir = os.path.join(args.save_dir, args.exp_name)
+    if not os.path.exists(tensorboard_dir):
+        os.makedirs(tensorboard_dir)
     device = torch.device("cuda") if args.cuda else torch.device("cpu")
-    env = gym.make(args.env)
+
+    # env and model setup
+    ac_kwargs = dict(hidden_sizes=[args.hid] * args.l)
+    p2_list = ["ReiwaThunder", "RHEA_PI", "Toothless", "MctsAi"]
+    # env = gym.make(args.env)
+    # env = make_ftg_ram(args.env, p2=args.p2)
+    env = make_ftg_ram_nonstation(args.env, p2_list=p2_list, total_episode=100)
     obs_dim = env.observation_space.shape[0]
     act_dim = env.action_space.n
-    # env = make_ftg_ram(args.env, p2=args.p2)
     global_ac = MLPActorCritic(obs_dim, act_dim, **ac_kwargs)
-    if os.path.exists(os.path.join(args.save_dir, "model")):
-        global_ac.load_state_dict(torch.load(os.path.join(args.save_dir, "model")))
+    if os.path.exists(os.path.join(args.save_dir, args.model_para)):
+        global_ac.load_state_dict(torch.load(os.path.join(args.save_dir, args.model_para)))
         # state_dict_trans(global_model.state_dict(), os.path.join(save_dir, numpy_para))
         print("load model")
     global_ac_targ = deepcopy(global_ac)
@@ -360,25 +386,25 @@ if __name__ == '__main__':
     var_counts = tuple(count_vars(module) for module in [global_ac.pi, global_ac.q1, global_ac.q2])
     print('\nNumber of parameters: \t pi: %d, \t q1: %d, \t q2: %d\n' % var_counts)
 
-    # this the kwargs for the single thread version
-
-
+    # async training setup
     T = Counter()
+    E = Counter()
     scores = mp.Manager().list()
+    win_rate = mp.Manager().list()
+
     processes = []
-    p2_list = ["MctsAi", "MctsAi", "MctsAi", "MctsAi", "MctsAi"]
     for rank in range(args.n_process):  # + 1 for test process
         # if rank == 0:
             # p = mp.Process(target=test, args=(global_model,))
         # else:
         p2 = p2_list[rank % len(p2_list)]
         single_version_kwargs = dict(ac_kwargs=ac_kwargs, env=args.env, p2=p2, gamma=args.gamma, seed=args.seed,
-                                     epochs=args.epochs,
-                                     steps_per_epoch=1000, replay_size=int(1e6),
-                                     polyak=0.995, lr=args.lr, alpha=0.2, batch_size=128, start_steps=1000,
-                                     update_after=10000, update_every=1, max_ep_len=500,
-                                     save_freq=1000,device=device)
-        p = mp.Process(target=sac, args=(global_ac, global_ac_targ, rank, T, args, scores), kwargs=single_version_kwargs)
+                                     total_episode=args.episode,
+                                     replay_size=int(1e6),
+                                     polyak=0.995, lr=args.lr, min_alpha=0.2, batch_size=128, start_steps=10000,
+                                     update_after=10000, update_every=1, max_ep_len=1000,
+                                     save_freq=1000, device=device, tensorboard_dir=tensorboard_dir,p2_list=p2_list)
+        p = mp.Process(target=sac, args=(global_ac, global_ac_targ, rank, T, E, args, scores,win_rate), kwargs=single_version_kwargs)
         p.start()
         time.sleep(5)
         processes.append(p)
