@@ -182,7 +182,7 @@ class ReplayBuffer:
         return {k: torch.as_tensor(v, dtype=torch.float32).to(device) for k, v in batch.items()}
 
 
-def sac(global_ac, global_ac_targ, rank, T, E, args, scores, win_rate, ac_kwargs=dict(), env=None, p2=None, seed=0,
+def sac(global_ac, global_ac_targ, rank, T, E, args, scores, wins, ac_kwargs=dict(), env=None, p2=None, seed=0,
         total_episode=100, replay_size=int(1e6), gamma=0.99,
         polyak=0.995, lr=1e-3, min_alpha=0.2, batch_size=100, start_steps=10000,
         update_after=1000, update_every=50, max_ep_len=1000, save_freq=1, device=None, tensorboard_dir=None, p2_list= None):
@@ -194,8 +194,8 @@ def sac(global_ac, global_ac_targ, rank, T, E, args, scores, win_rate, ac_kwargs
         os.makedirs(tensorboard_dir)
     writer = SummaryWriter(log_dir=tensorboard_dir)
     # env = gym.make(args.env)
-    # env = make_ftg_ram(args.env, p2=args.p2)
-    env = make_ftg_ram_nonstation(args.env, p2_list=p2_list, total_episode=100)
+    env = make_ftg_ram(args.env, p2=p2)
+    # env = make_ftg_ram_nonstation(args.env, p2_list=p2_list, total_episode=100)
     obs_dim = env.observation_space.shape[0]
     act_dim = env.action_space.n
     print("set up child process env")
@@ -269,11 +269,16 @@ def sac(global_ac, global_ac_targ, rank, T, E, args, scores, win_rate, ac_kwargs
             E.increment()
             e = E.value()
             # logger.store(EpRet=ep_ret, EpLen=ep_len)
+            if info.get('win', False):
+                wins.append(1)
+            else:
+                wins.append(0)
             scores.append(ep_ret)
             m_score = np.mean(scores[-100:])
+            win_rate = np.mean(wins[-100:])
             print(
-                "Process {}, opponent:{}, # of global_episode :{},  # of global_steps :{}, round score: {}, mean score : {:.1f}, steps: {}, alpha: {}".format(
-                    rank, p2, e, t, ep_ret, m_score, ep_len, alpha.item()))
+                "Process {}, opponent:{}, # of global_episode :{},  # of global_steps :{}, round score: {}, mean score : {:.1f}, win_rate:{}, steps: {}, alpha: {}".format(
+                    rank, p2, e, t, ep_ret, m_score, win_rate, ep_len, alpha.item()))
             writer.add_scalar("metrics/round_score", ep_ret, e)
             writer.add_scalar("metrics/mean_score", m_score.item(), e)
             writer.add_scalar("metrics/round_step", ep_len, e)
@@ -327,6 +332,7 @@ def sac(global_ac, global_ac_targ, rank, T, E, args, scores, win_rate, ac_kwargs
         if t % save_freq == 0 and t > 0:
             torch.save(global_ac.state_dict(), os.path.join(args.save_dir, args.model_para))
             state_dict_trans(global_ac.state_dict(), os.path.join(args.save_dir, args.numpy_para))
+            torch.save((e, t, scores, wins), os.path.join(args.save_dir, args.train_indicator))
             print("Saving model at episode:{}".format(t))
 
 
@@ -334,7 +340,7 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     # parser.add_argument('--env', type=str, default="CartPole-v0")
     parser.add_argument('--env', type=str, default="FightingiceDataFrameskip-v0")
-    parser.add_argument('--p2', type=str, default="ReiwaThunder")
+    parser.add_argument('--p2', type=str, default="Toothless")
     parser.add_argument('--hid', type=int, default=256)
     parser.add_argument('--cuda', type=bool, default=True)
     parser.add_argument('--l', type=int, default=2)
@@ -342,12 +348,13 @@ if __name__ == '__main__':
     parser.add_argument('--lr', type=float, default=1e-4)
     parser.add_argument('--seed', '-s', type=int, default=0)
     parser.add_argument('--episode', type=int, default=100000)
-    parser.add_argument('--exp_name', type=str, default='non_stationary')
+    parser.add_argument('--exp_name', type=str, default='Toothless')
     parser.add_argument('--n_process', type=int, default=5)
     parser.add_argument('--save-dir', type=str, default="./experiments")
     parser.add_argument('--traj_dir', type=str, default="./experiments")
-    parser.add_argument('--model_para', type=str, default="non_stationary.torch")
-    parser.add_argument('--numpy_para', type=str, default="non_stationary.numpy")
+    parser.add_argument('--model_para', type=str, default="Toothless.torch")
+    parser.add_argument('--numpy_para', type=str, default="Toothless.numpy")
+    parser.add_argument('--train_indicator', type=str, default="Toothless.data")
     args = parser.parse_args()
 
     # Basic Settings
@@ -364,10 +371,10 @@ if __name__ == '__main__':
 
     # env and model setup
     ac_kwargs = dict(hidden_sizes=[args.hid] * args.l)
-    p2_list = ["ReiwaThunder", "RHEA_PI", "Toothless", "MctsAi"]
+    p2_list = ["Toothless", "Toothless", "Toothless", "Toothless"]
     # env = gym.make(args.env)
-    # env = make_ftg_ram(args.env, p2=args.p2)
-    env = make_ftg_ram_nonstation(args.env, p2_list=p2_list, total_episode=100)
+    env = make_ftg_ram(args.env, p2=args.p2)
+    # env = make_ftg_ram_nonstation(args.env, p2_list=p2_list, total_episode=100)
     obs_dim = env.observation_space.shape[0]
     act_dim = env.action_space.n
     global_ac = MLPActorCritic(obs_dim, act_dim, **ac_kwargs)
@@ -390,7 +397,7 @@ if __name__ == '__main__':
     T = Counter()
     E = Counter()
     scores = mp.Manager().list()
-    win_rate = mp.Manager().list()
+    wins = mp.Manager().list()
 
     processes = []
     for rank in range(args.n_process):  # + 1 for test process
@@ -404,7 +411,7 @@ if __name__ == '__main__':
                                      polyak=0.995, lr=args.lr, min_alpha=0.2, batch_size=128, start_steps=10000,
                                      update_after=10000, update_every=1, max_ep_len=1000,
                                      save_freq=1000, device=device, tensorboard_dir=tensorboard_dir,p2_list=p2_list)
-        p = mp.Process(target=sac, args=(global_ac, global_ac_targ, rank, T, E, args, scores,win_rate), kwargs=single_version_kwargs)
+        p = mp.Process(target=sac, args=(global_ac, global_ac_targ, rank, T, E, args, scores,wins), kwargs=single_version_kwargs)
         p.start()
         time.sleep(5)
         processes.append(p)
