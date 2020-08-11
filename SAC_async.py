@@ -194,8 +194,10 @@ def sac(global_ac, global_ac_targ, rank, T, E, args, scores, wins, ac_kwargs=dic
         os.makedirs(tensorboard_dir)
     writer = SummaryWriter(log_dir=tensorboard_dir)
     # env = gym.make(args.env)
-    env = make_ftg_ram(args.env, p2=p2)
-    # env = make_ftg_ram_nonstation(args.env, p2_list=p2_list, total_episode=100)
+    if not args.non_station:
+        env = make_ftg_ram(args.env, p2=args.p2)
+    else:
+        env = make_ftg_ram_nonstation(args.env, p2_list=args.list, total_episode=100)
     obs_dim = env.observation_space.shape[0]
     act_dim = env.action_space.n
     print("set up child process env")
@@ -217,7 +219,7 @@ def sac(global_ac, global_ac_targ, rank, T, E, args, scores, wins, ac_kwargs=dic
     # Entropy Tuning
     target_entropy = -torch.prod(torch.Tensor(env.action_space.shape).to(device)).item()  # heuristic value from the paper
     log_alpha = torch.zeros(1, requires_grad=True, device=device)
-    alpha = log_alpha.exp().to(device)
+    alpha = max(log_alpha.exp().item(), min_alpha)
 
     # Set up optimizers for policy and q-function
     # Async Version
@@ -278,7 +280,7 @@ def sac(global_ac, global_ac_targ, rank, T, E, args, scores, wins, ac_kwargs=dic
             win_rate = np.mean(wins[-100:])
             print(
                 "Process {}, opponent:{}, # of global_episode :{},  # of global_steps :{}, round score: {}, mean score : {:.1f}, win_rate:{}, steps: {}, alpha: {}".format(
-                    rank, p2, e, t, ep_ret, m_score, win_rate, ep_len, alpha.item()))
+                    rank, p2, e, t, ep_ret, m_score, win_rate, ep_len, alpha))
             writer.add_scalar("metrics/round_score", ep_ret, e)
             writer.add_scalar("metrics/mean_score", m_score.item(), e)
             writer.add_scalar("metrics/round_step", ep_len, e)
@@ -308,8 +310,7 @@ def sac(global_ac, global_ac_targ, rank, T, E, args, scores, wins, ac_kwargs=dic
                 alpha_optim.zero_grad()
                 alpha_loss = -(log_alpha * (entropy + target_entropy).detach()).mean()
                 alpha_loss.backward(retain_graph=False)
-                alpha = log_alpha.exp().to(device)
-                # alpha = max(log_alpha.exp().item(), min_alpha)
+                alpha = max(log_alpha.exp().item(), min_alpha)
 
                 pi_optimizer.step()
                 q1_optimizer.step()
@@ -330,9 +331,9 @@ def sac(global_ac, global_ac_targ, rank, T, E, args, scores, wins, ac_kwargs=dic
                 writer.add_scalar("training/entropy", entropy.detach().mean().item(),t)
 
         if t % save_freq == 0 and t > 0:
-            torch.save(global_ac.state_dict(), os.path.join(args.save_dir, args.model_para))
-            state_dict_trans(global_ac.state_dict(), os.path.join(args.save_dir, args.numpy_para))
-            torch.save((e, t, scores, wins), os.path.join(args.save_dir, args.train_indicator))
+            torch.save(global_ac.state_dict(), os.path.join(args.save_dir, args.exp_name, args.model_para))
+            state_dict_trans(global_ac.state_dict(), os.path.join(args.save_dir, args.exp_name,  args.numpy_para))
+            torch.save((e, t, scores, wins), os.path.join(args.save_dir, args.exp_name, args.train_indicator))
             print("Saving model at episode:{}".format(t))
 
 
@@ -341,8 +342,14 @@ if __name__ == '__main__':
     # parser.add_argument('--env', type=str, default="CartPole-v0")
     parser.add_argument('--env', type=str, default="FightingiceDataFrameskip-v0")
     parser.add_argument('--p2', type=str, default="Toothless")
+    parser.add_argument('--non_station', default=False, action='store_true')
+    parser.add_argument('--list', nargs='+')
     parser.add_argument('--hid', type=int, default=256)
-    parser.add_argument('--cuda', type=bool, default=True)
+    parser.add_argument('--batch_size', type=int, default=256)
+    parser.add_argument('--start_steps', type=int, default=10000)
+    parser.add_argument('--update_after', type=int, default=10000)
+    parser.add_argument('--min_alpha', type=float, default=0.1)
+    parser.add_argument('--cuda',default=False, action='store_true')
     parser.add_argument('--l', type=int, default=2)
     parser.add_argument('--gamma', type=float, default=0.99)
     parser.add_argument('--lr', type=float, default=1e-4)
@@ -362,19 +369,21 @@ if __name__ == '__main__':
     os.environ['OMP_NUM_THREADS'] = '1'
     os.environ['MKL_NUM_THREADS'] = '1'
     torch.set_num_threads(torch.get_num_threads())
-    if not os.path.exists(args.save_dir):
-        os.makedirs(args.save_dir)
-    tensorboard_dir = os.path.join(args.save_dir, args.exp_name)
+    experiment_dir = os.path.join(args.save_dir, args.exp_name)
+    if not os.path.exists(experiment_dir):
+        os.makedirs(experiment_dir)
+    tensorboard_dir = os.path.join(experiment_dir, "runs")
     if not os.path.exists(tensorboard_dir):
         os.makedirs(tensorboard_dir)
-    device = torch.device("cuda") if args.cuda else torch.device("cpu")
 
+    device = torch.device("cuda") if args.cuda else torch.device("cpu")
     # env and model setup
     ac_kwargs = dict(hidden_sizes=[args.hid] * args.l)
-    p2_list = ["Toothless", "Toothless", "Toothless", "Toothless"]
     # env = gym.make(args.env)
-    env = make_ftg_ram(args.env, p2=args.p2)
-    # env = make_ftg_ram_nonstation(args.env, p2_list=p2_list, total_episode=100)
+    if not args.non_station:
+        env = make_ftg_ram(args.env, p2=args.p2)
+    else:
+        env = make_ftg_ram_nonstation(args.env, p2_list=args.list, total_episode=100)
     obs_dim = env.observation_space.shape[0]
     act_dim = env.action_space.n
     global_ac = MLPActorCritic(obs_dim, act_dim, **ac_kwargs)
@@ -404,14 +413,12 @@ if __name__ == '__main__':
         # if rank == 0:
             # p = mp.Process(target=test, args=(global_model,))
         # else:
-        p2 = p2_list[rank % len(p2_list)]
-        single_version_kwargs = dict(ac_kwargs=ac_kwargs, env=args.env, p2=p2, gamma=args.gamma, seed=args.seed,
-                                     total_episode=args.episode,
-                                     replay_size=int(1e6),
-                                     polyak=0.995, lr=args.lr, min_alpha=0.2, batch_size=128, start_steps=10000,
-                                     update_after=10000, update_every=1, max_ep_len=1000,
-                                     save_freq=1000, device=device, tensorboard_dir=tensorboard_dir,p2_list=p2_list)
-        p = mp.Process(target=sac, args=(global_ac, global_ac_targ, rank, T, E, args, scores,wins), kwargs=single_version_kwargs)
+        single_version_kwargs = dict(ac_kwargs=ac_kwargs, env=args.env, p2=args.p2,  p2_list=args.list, gamma=args.gamma, seed=args.seed,
+                                     total_episode=args.episode, lr=args.lr, min_alpha=args.min_alpha,
+                                     update_after=args.update_after, batch_size=args.batch_size, start_steps=args.start_steps,
+                                     replay_size=int(1e6), update_every=1, max_ep_len=1000, save_freq=1000, polyak=0.995,
+                                     device=device, tensorboard_dir=tensorboard_dir,)
+        p = mp.Process(target=sac, args=(global_ac, global_ac_targ, rank, T, E, args, scores, wins), kwargs=single_version_kwargs)
         p.start()
         time.sleep(5)
         processes.append(p)
