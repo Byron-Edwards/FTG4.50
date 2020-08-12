@@ -80,6 +80,7 @@ class MLPActorCritic(nn.Module):
         self.pi = Actor(obs_dim, act_dim, hidden_sizes, activation)
         self.q1 = Critic(obs_dim, act_dim, hidden_sizes, activation)
         self.q2 = Critic(obs_dim, act_dim, hidden_sizes, activation)
+        self.log_alpha = nn.Parameter(torch.zeros(1))
 
     # Set up function for computing SAC Q-losses
     def compute_loss_q(self,data, ac_targ, gamma, alpha):
@@ -218,15 +219,14 @@ def sac(global_ac, global_ac_targ, rank, T, E, args, scores, wins, ac_kwargs=dic
 
     # Entropy Tuning
     target_entropy = -torch.prod(torch.Tensor(env.action_space.shape).to(device)).item()  # heuristic value from the paper
-    log_alpha = torch.zeros(1, requires_grad=True, device=device)
-    alpha = max(log_alpha.exp().item(), min_alpha)
+    alpha = max(local_ac.log_alpha.exp().item(), min_alpha)
 
     # Set up optimizers for policy and q-function
     # Async Version
     pi_optimizer = Adam(global_ac.pi.parameters(), lr=lr)
     q1_optimizer = Adam(global_ac.q1.parameters(), lr=lr)
     q2_optimizer = Adam(global_ac.q2.parameters(), lr=lr)
-    alpha_optim = Adam([log_alpha], lr=lr, eps=1e-4)
+    alpha_optim = Adam([global_ac.log_alpha], lr=lr, eps=1e-4)
 
     # Prepare for interaction with environment
     o, ep_ret, ep_len = env.reset(), 0, 0
@@ -283,6 +283,7 @@ def sac(global_ac, global_ac_targ, rank, T, E, args, scores, wins, ac_kwargs=dic
                     rank, p2, e, t, ep_ret, m_score, win_rate, ep_len, alpha))
             writer.add_scalar("metrics/round_score", ep_ret, e)
             writer.add_scalar("metrics/mean_score", m_score.item(), e)
+            writer.add_scalar("metrics/win_rate", win_rate.item(), e)
             writer.add_scalar("metrics/round_step", ep_len, e)
             writer.add_scalar("metrics/alpha", alpha, e)
             o, ep_ret, ep_len = env.reset(), 0, 0
@@ -304,13 +305,13 @@ def sac(global_ac, global_ac_targ, rank, T, E, args, scores, wins, ac_kwargs=dic
                 loss_pi, entropy = local_ac.compute_loss_pi(batch, alpha)
                 loss_pi.backward()
 
+                alpha_optim.zero_grad()
+                alpha_loss = -(local_ac.log_alpha * (entropy + target_entropy).detach()).mean()
+                alpha_loss.backward(retain_graph=False)
+                alpha = max(local_ac.log_alpha.exp().item(), min_alpha)
+
                 for global_param, local_param in zip(global_ac.parameters(), local_ac.parameters()):
                     global_param._grad = local_param.grad
-
-                alpha_optim.zero_grad()
-                alpha_loss = -(log_alpha * (entropy + target_entropy).detach()).mean()
-                alpha_loss.backward(retain_graph=False)
-                alpha = max(log_alpha.exp().item(), min_alpha)
 
                 pi_optimizer.step()
                 q1_optimizer.step()
@@ -325,15 +326,15 @@ def sac(global_ac, global_ac_targ, rank, T, E, args, scores, wins, ac_kwargs=dic
                     for p, p_targ in zip(global_ac.parameters(), global_ac_targ.parameters()):
                         p_targ.data.copy_((1 - polyak) * p.data + polyak * p_targ.data)
 
-                writer.add_scalar("training/pi_loss", loss_pi.detach().item(),t)
-                writer.add_scalar("training/q_loss", loss_q.detach().item(),t)
-                writer.add_scalar("training/alpha_loss", alpha_loss.detach().item(),t)
-                writer.add_scalar("training/entropy", entropy.detach().mean().item(),t)
+                writer.add_scalar("training/pi_loss", loss_pi.detach().item(), t)
+                writer.add_scalar("training/q_loss", loss_q.detach().item(), t)
+                writer.add_scalar("training/alpha_loss", alpha_loss.detach().item(), t)
+                writer.add_scalar("training/entropy", entropy.detach().mean().item(), t)
 
         if t % save_freq == 0 and t > 0:
             torch.save(global_ac.state_dict(), os.path.join(args.save_dir, args.exp_name, args.model_para))
             state_dict_trans(global_ac.state_dict(), os.path.join(args.save_dir, args.exp_name,  args.numpy_para))
-            torch.save((e, t, scores, wins), os.path.join(args.save_dir, args.exp_name, args.train_indicator))
+            torch.save((e, t, list(scores), list(wins)), os.path.join(args.save_dir, args.exp_name, args.train_indicator))
             print("Saving model at episode:{}".format(t))
 
 
@@ -341,7 +342,7 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     # parser.add_argument('--env', type=str, default="CartPole-v0")
     parser.add_argument('--env', type=str, default="FightingiceDataFrameskip-v0")
-    parser.add_argument('--p2', type=str, default="Toothless")
+    parser.add_argument('--p2', type=str, default="ReiwaThunder")
     parser.add_argument('--non_station', default=False, action='store_true')
     parser.add_argument('--list', nargs='+')
     parser.add_argument('--hid', type=int, default=256)
@@ -355,13 +356,13 @@ if __name__ == '__main__':
     parser.add_argument('--lr', type=float, default=1e-4)
     parser.add_argument('--seed', '-s', type=int, default=0)
     parser.add_argument('--episode', type=int, default=100000)
-    parser.add_argument('--exp_name', type=str, default='Toothless')
+    parser.add_argument('--exp_name', type=str, default='ReiwaThunder')
     parser.add_argument('--n_process', type=int, default=5)
     parser.add_argument('--save-dir', type=str, default="./experiments")
     parser.add_argument('--traj_dir', type=str, default="./experiments")
-    parser.add_argument('--model_para', type=str, default="Toothless.torch")
-    parser.add_argument('--numpy_para', type=str, default="Toothless.numpy")
-    parser.add_argument('--train_indicator', type=str, default="Toothless.data")
+    parser.add_argument('--model_para', type=str, default="ReiwaThunder.torch")
+    parser.add_argument('--numpy_para', type=str, default="ReiwaThunder.numpy")
+    parser.add_argument('--train_indicator', type=str, default="ReiwaThunder.data")
     args = parser.parse_args()
 
     # Basic Settings
@@ -387,10 +388,24 @@ if __name__ == '__main__':
     obs_dim = env.observation_space.shape[0]
     act_dim = env.action_space.n
     global_ac = MLPActorCritic(obs_dim, act_dim, **ac_kwargs)
-    if os.path.exists(os.path.join(args.save_dir, args.model_para)):
-        global_ac.load_state_dict(torch.load(os.path.join(args.save_dir, args.model_para)))
-        # state_dict_trans(global_model.state_dict(), os.path.join(save_dir, numpy_para))
+
+    # async training setup
+    T = Counter()
+    E = Counter()
+    scores = mp.Manager().list()
+    wins = mp.Manager().list()
+
+    if os.path.exists(os.path.join(args.save_dir, args.exp_name, args.model_para)):
+        global_ac.load_state_dict(torch.load(os.path.join(args.save_dir, args.exp_name, args.model_para)))
         print("load model")
+    if os.path.exists(os.path.join(args.save_dir, args.exp_name, args.train_indicator)):
+        (e, t, scores_list, wins_list) = torch.load(os.path.join(args.save_dir, args.exp_name, args.train_indicator))
+        T.set(t)
+        E.set(e)
+        scores.extend(scores_list)
+        wins.extend(wins_list)
+        print("load training indicator")
+
     global_ac_targ = deepcopy(global_ac)
     env.close()
     del env
@@ -401,12 +416,6 @@ if __name__ == '__main__':
         global_ac_targ.to(device)
     var_counts = tuple(count_vars(module) for module in [global_ac.pi, global_ac.q1, global_ac.q2])
     print('\nNumber of parameters: \t pi: %d, \t q1: %d, \t q2: %d\n' % var_counts)
-
-    # async training setup
-    T = Counter()
-    E = Counter()
-    scores = mp.Manager().list()
-    wins = mp.Manager().list()
 
     processes = []
     for rank in range(args.n_process):  # + 1 for test process
@@ -424,6 +433,5 @@ if __name__ == '__main__':
         processes.append(p)
     for p in processes:
         p.join()
-
 
 
