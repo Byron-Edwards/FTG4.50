@@ -407,7 +407,7 @@ class FTGWrapper(gym.Wrapper):
 
 
 class FTGNonstationWrapper(gym.Wrapper):
-    def __init__(self, env, p2_list, total_episode=1000):
+    def __init__(self, env, p2_list, total_episode=1000, stable=False):
         gym.Wrapper.__init__(self, env)
         self.p2_list = p2_list
         self.shuffled_p2 = self.p2_list
@@ -415,21 +415,25 @@ class FTGNonstationWrapper(gym.Wrapper):
         self.current_episode = 1
         self.p2_num = len(self.p2_list)
         self.p2 = None
-        self.create_order()
+        self.stable = stable
+        self.create_order(self.stable)
 
-    def create_order(self):
-        np.random.shuffle(self.shuffled_p2)
-        self.p2 = self.shuffled_p2[0]
-        random_list = np.random.uniform(0, 1, self.p2_num)
-        random_list = (random_list / np.sum(random_list) * self.total_episode).astype("int")
+    def create_order(self, stable=False):
+        if stable:
+            random_list = [self.total_episode//self.p2_num for i in range(self.p2_num)]
+        else:
+            np.random.shuffle(self.shuffled_p2)
+            self.p2 = self.shuffled_p2[0]
+            random_list = np.random.uniform(0, 1, self.p2_num)
+            random_list = (random_list / np.sum(random_list) * self.total_episode).astype("int")
         random_list[-1] += self.total_episode - np.sum(random_list)
         self.random_list = random_list
-        print("Shuffled p2 list: {} \n p2_counters:{}".format(self.shuffled_p2, self.random_list))
+        print("Mode:{}, Shuffled p2 list: {} \n p2_counters:{}".format("stable" if stable else "random", self.shuffled_p2, self.random_list))
 
     def reset(self):
         if self.current_episode >= np.sum(self.random_list):
             self.current_episode = 1
-            self.create_order()
+            self.create_order(self.stable)
         for index, p2 in enumerate(self.shuffled_p2):
             if self.current_episode <= np.sum(self.random_list[0:index + 1]):
                 if self.p2 != p2:
