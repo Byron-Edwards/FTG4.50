@@ -198,7 +198,7 @@ def sac(global_ac, global_ac_targ, rank, T, E, args, scores, wins, ac_kwargs=dic
     if not args.non_station:
         env = make_ftg_ram(args.env, p2=args.p2)
     else:
-        env = make_ftg_ram_nonstation(args.env, p2_list=args.list, total_episode=100)
+        env = make_ftg_ram_nonstation(args.env, p2_list=args.list, total_episode=args.station_rounds,stable=args.stable)
     obs_dim = env.observation_space.shape[0]
     act_dim = env.action_space.n
     print("set up child process env")
@@ -344,6 +344,8 @@ if __name__ == '__main__':
     parser.add_argument('--env', type=str, default="FightingiceDataFrameskip-v0")
     parser.add_argument('--p2', type=str, default="ReiwaThunder")
     parser.add_argument('--non_station', default=False, action='store_true')
+    parser.add_argument('--stable', default=False, action='store_true')
+    parser.add_argument('--station_rounds', type=int,default=1000)
     parser.add_argument('--list', nargs='+')
     parser.add_argument('--hid', type=int, default=256)
     parser.add_argument('--batch_size', type=int, default=256)
@@ -384,7 +386,7 @@ if __name__ == '__main__':
     if not args.non_station:
         env = make_ftg_ram(args.env, p2=args.p2)
     else:
-        env = make_ftg_ram_nonstation(args.env, p2_list=args.list, total_episode=100)
+        env = make_ftg_ram_nonstation(args.env, p2_list=args.list, total_episode=args.station_rounds, stable=args.stable)
     obs_dim = env.observation_space.shape[0]
     act_dim = env.action_space.n
     global_ac = MLPActorCritic(obs_dim, act_dim, **ac_kwargs)

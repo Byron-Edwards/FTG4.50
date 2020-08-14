@@ -483,10 +483,10 @@ def make_ftg_ram(env_name, p2, port=None, java_env_path="."):
     return env
 
 
-def make_ftg_ram_nonstation(env_name, p2_list, total_episode=100, port=None, java_env_path="."):
+def make_ftg_ram_nonstation(env_name, p2_list, total_episode=100, port=None, java_env_path=".",stable=False):
     if port is None:
         env = gym.make(env_name, java_env_path=java_env_path)
     else:
         env = gym.make(env_name, java_env_path=java_env_path, port=port)
-    env = FTGNonstationWrapper(env, p2_list, total_episode)
+    env = FTGNonstationWrapper(env, p2_list, total_episode,stable)
     return env
