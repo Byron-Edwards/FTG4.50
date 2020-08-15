@@ -12,10 +12,14 @@ import torch.multiprocessing as mp
 from torch.optim import Adam
 from torch.distributions import Categorical
 from copy import deepcopy
+from collections import namedtuple
+import random
 # from tensorboardX import GlobalSummaryWriter
 from torch.utils.tensorboard import SummaryWriter
 from OpenAI.atari_wrappers import make_ftg_ram,make_ftg_ram_nonstation
 from model_parameter_trans import state_dict_trans,load_trajectory
+
+Transition = namedtuple('Transition', ('obs', 'next_obs', 'action', 'reward', 'done'))
 
 def combined_shape(length, shape=None):
     if shape is None:
@@ -184,7 +188,41 @@ class ReplayBuffer:
         return {k: torch.as_tensor(v, dtype=torch.float32).to(device) for k, v in batch.items()}
 
 
-def sac(global_ac, global_ac_targ, rank, T, E, args, scores, wins, ac_kwargs=dict(), env=None, p2=None, seed=0,
+class ReplayBufferShare:
+    """
+    A simple FIFO experience replay buffer for SAC async version.
+    """
+
+    def __init__(self, buffer, size):
+        self.buffer = buffer
+        self.ptr, self.size, self.max_size = 0, 0, size
+
+    def store(self, obs, act, rew, next_obs, done):
+        if len(self.buffer) < self.max_size:
+            self.buffer.append(Transition(obs=obs, next_obs=next_obs, action=act, reward=rew, done=done))
+        else:
+            self.buffer[self.ptr] = Transition(obs=obs, next_obs=next_obs, action=act, reward=rew, done=done)
+        self.ptr = (self.ptr + 1) % self.max_size
+
+    def store_trajectory(self, trajectory):
+        for i in trajectory:
+            self.store(i["obs"], i["action"], i["reward"], i["next_obs"], i["done"])
+
+    def sample_batch(self, batch_size=32, device=None):
+        idxs = np.random.randint(0, len(self.buffer), size=batch_size)
+        batch = [self.buffer[i] for i in idxs]
+        obs_buf, obs2_buf, act_buf, rew_buf, done_buf = [], [], [], [], []
+        for trans in batch:
+            obs_buf.append(trans.obs)
+            obs2_buf.append(trans.next_obs)
+            act_buf.append(trans.action)
+            rew_buf.append(trans.reward)
+            done_buf.append(trans.done)
+        batch_dict = dict(obs=obs_buf, obs2=obs2_buf, act=act_buf, rew=rew_buf, done=done_buf)
+        return {k: torch.as_tensor(v, dtype=torch.float32).to(device) for k, v in batch_dict.items()}
+
+
+def sac(global_ac, global_ac_targ, rank, T, E, args, scores, wins,buffer, ac_kwargs=dict(), env=None, p2=None, seed=0,
         total_episode=100, replay_size=int(1e6), gamma=0.99,
         polyak=0.995, lr=1e-3, min_alpha=0.2, fix_alpha=False, batch_size=100, start_steps=10000,
         update_after=1000, update_every=50, max_ep_len=1000, save_freq=1, device=None, tensorboard_dir=None, p2_list= None):
@@ -214,7 +252,8 @@ def sac(global_ac, global_ac_targ, rank, T, E, args, scores, wins, ac_kwargs=dic
         p.requires_grad = False
 
     # Experience buffer
-    replay_buffer = ReplayBuffer(obs_dim=obs_dim, size=replay_size)
+    # replay_buffer = ReplayBuffer(obs_dim=obs_dim, size=replay_size)
+    replay_buffer = ReplayBufferShare(buffer=buffer, size=args.replay_size)
     # if args.traj_dir:
     #     replay_buffer.store_trajectory(load_trajectory(args.traj_dir))
 
@@ -346,8 +385,8 @@ if __name__ == '__main__':
     parser.add_argument('--p2', type=str, default="ReiwaThunder")
     parser.add_argument('--non_station', default=False, action='store_true')
     parser.add_argument('--stable', default=False, action='store_true')
-    parser.add_argument('--station_rounds', type=int,default=1000)
-    parser.add_argument('--replay_size', type=int, default=1000000)
+    parser.add_argument('--station_rounds', type=int, default=1000)
+    parser.add_argument('--replay_size', type=int, default=10000)
     parser.add_argument('--list', nargs='+')
     parser.add_argument('--hid', type=int, default=256)
     parser.add_argument('--batch_size', type=int, default=256)
@@ -361,14 +400,14 @@ if __name__ == '__main__':
     parser.add_argument('--lr', type=float, default=1e-4)
     parser.add_argument('--seed', '-s', type=int, default=0)
     parser.add_argument('--episode', type=int, default=100000)
-    parser.add_argument('--exp_name', type=str, default='ReiwaThunder')
-    parser.add_argument('--n_process', type=int, default=5)
+    parser.add_argument('--exp_name', type=str, default='test')
+    parser.add_argument('--n_process', type=int, default=8)
     parser.add_argument('--save_freq', type=int, default=1000)
     parser.add_argument('--save-dir', type=str, default="./experiments")
     parser.add_argument('--traj_dir', type=str, default="./experiments")
-    parser.add_argument('--model_para', type=str, default="ReiwaThunder.torch")
-    parser.add_argument('--numpy_para', type=str, default="ReiwaThunder.numpy")
-    parser.add_argument('--train_indicator', type=str, default="ReiwaThunder.data")
+    parser.add_argument('--model_para', type=str, default="test.torch")
+    parser.add_argument('--numpy_para', type=str, default="test.numpy")
+    parser.add_argument('--train_indicator', type=str, default="test.data")
     args = parser.parse_args()
 
     # Basic Settings
@@ -401,6 +440,7 @@ if __name__ == '__main__':
     E = Counter()
     scores = mp.Manager().list()
     wins = mp.Manager().list()
+    buffer = mp.Manager().list()
 
     if os.path.exists(os.path.join(args.save_dir, args.exp_name, args.model_para)):
         global_ac.load_state_dict(torch.load(os.path.join(args.save_dir, args.exp_name, args.model_para)))
@@ -433,8 +473,8 @@ if __name__ == '__main__':
                                      total_episode=args.episode, lr=args.lr, min_alpha=args.min_alpha, fix_alpha=True,
                                      update_after=args.update_after, batch_size=args.batch_size, start_steps=args.start_steps,
                                      replay_size=args.replay_size, update_every=1, max_ep_len=1000, save_freq=args.save_freq, polyak=0.995,
-                                     device=device, tensorboard_dir=tensorboard_dir,)
-        p = mp.Process(target=sac, args=(global_ac, global_ac_targ, rank, T, E, args, scores, wins), kwargs=single_version_kwargs)
+                                     device=device, tensorboard_dir=tensorboard_dir)
+        p = mp.Process(target=sac, args=(global_ac, global_ac_targ, rank, T, E, args, scores, wins, buffer), kwargs=single_version_kwargs)
         p.start()
         time.sleep(5)
         processes.append(p)
