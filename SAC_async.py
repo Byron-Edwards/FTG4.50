@@ -1,6 +1,7 @@
 import gym
 import argparse
 import gym_fightingice
+import json
 import os
 import time
 import numpy as np
@@ -185,7 +186,7 @@ class ReplayBuffer:
 
 def sac(global_ac, global_ac_targ, rank, T, E, args, scores, wins, ac_kwargs=dict(), env=None, p2=None, seed=0,
         total_episode=100, replay_size=int(1e6), gamma=0.99,
-        polyak=0.995, lr=1e-3, min_alpha=0.2, batch_size=100, start_steps=10000,
+        polyak=0.995, lr=1e-3, min_alpha=0.2, fix_alpha=False, batch_size=100, start_steps=10000,
         update_after=1000, update_every=50, max_ep_len=1000, save_freq=1, device=None, tensorboard_dir=None, p2_list= None):
     torch.manual_seed(seed + rank)
     np.random.seed(seed + rank)
@@ -219,7 +220,7 @@ def sac(global_ac, global_ac_targ, rank, T, E, args, scores, wins, ac_kwargs=dic
 
     # Entropy Tuning
     target_entropy = -torch.prod(torch.Tensor(env.action_space.shape).to(device)).item()  # heuristic value from the paper
-    alpha = max(local_ac.log_alpha.exp().item(), min_alpha)
+    alpha = max(local_ac.log_alpha.exp().item(), min_alpha) if not fix_alpha else min_alpha
 
     # Set up optimizers for policy and q-function
     # Async Version
@@ -308,7 +309,7 @@ def sac(global_ac, global_ac_targ, rank, T, E, args, scores, wins, ac_kwargs=dic
                 alpha_optim.zero_grad()
                 alpha_loss = -(local_ac.log_alpha * (entropy + target_entropy).detach()).mean()
                 alpha_loss.backward(retain_graph=False)
-                alpha = max(local_ac.log_alpha.exp().item(), min_alpha)
+                alpha = max(local_ac.log_alpha.exp().item(), min_alpha) if not fix_alpha else min_alpha
 
                 for global_param, local_param in zip(global_ac.parameters(), local_ac.parameters()):
                     global_param._grad = local_param.grad
@@ -346,12 +347,14 @@ if __name__ == '__main__':
     parser.add_argument('--non_station', default=False, action='store_true')
     parser.add_argument('--stable', default=False, action='store_true')
     parser.add_argument('--station_rounds', type=int,default=1000)
+    parser.add_argument('--replay_size', type=int, default=1000000)
     parser.add_argument('--list', nargs='+')
     parser.add_argument('--hid', type=int, default=256)
     parser.add_argument('--batch_size', type=int, default=256)
     parser.add_argument('--start_steps', type=int, default=10000)
     parser.add_argument('--update_after', type=int, default=10000)
-    parser.add_argument('--min_alpha', type=float, default=0.1)
+    parser.add_argument('--min_alpha', type=float, default=0.3)
+    parser.add_argument('--fix_alpha', default=False, action="store_true")
     parser.add_argument('--cuda',default=False, action='store_true')
     parser.add_argument('--l', type=int, default=2)
     parser.add_argument('--gamma', type=float, default=0.99)
@@ -360,6 +363,7 @@ if __name__ == '__main__':
     parser.add_argument('--episode', type=int, default=100000)
     parser.add_argument('--exp_name', type=str, default='ReiwaThunder')
     parser.add_argument('--n_process', type=int, default=5)
+    parser.add_argument('--save_freq', type=int, default=1000)
     parser.add_argument('--save-dir', type=str, default="./experiments")
     parser.add_argument('--traj_dir', type=str, default="./experiments")
     parser.add_argument('--model_para', type=str, default="ReiwaThunder.torch")
@@ -378,7 +382,8 @@ if __name__ == '__main__':
     tensorboard_dir = os.path.join(experiment_dir, "runs")
     if not os.path.exists(tensorboard_dir):
         os.makedirs(tensorboard_dir)
-
+    with open(os.path.join(experiment_dir, "arguments"), 'w') as f:
+        json.dump(args.__dict__, f, indent=2)
     device = torch.device("cuda") if args.cuda else torch.device("cpu")
     # env and model setup
     ac_kwargs = dict(hidden_sizes=[args.hid] * args.l)
@@ -425,9 +430,9 @@ if __name__ == '__main__':
             # p = mp.Process(target=test, args=(global_model,))
         # else:
         single_version_kwargs = dict(ac_kwargs=ac_kwargs, env=args.env, p2=args.p2,  p2_list=args.list, gamma=args.gamma, seed=args.seed,
-                                     total_episode=args.episode, lr=args.lr, min_alpha=args.min_alpha,
+                                     total_episode=args.episode, lr=args.lr, min_alpha=args.min_alpha, fix_alpha=True,
                                      update_after=args.update_after, batch_size=args.batch_size, start_steps=args.start_steps,
-                                     replay_size=int(1e6), update_every=1, max_ep_len=1000, save_freq=1000, polyak=0.995,
+                                     replay_size=args.replay_size, update_every=1, max_ep_len=1000, save_freq=args.save_freq, polyak=0.995,
                                      device=device, tensorboard_dir=tensorboard_dir,)
         p = mp.Process(target=sac, args=(global_ac, global_ac_targ, rank, T, E, args, scores, wins), kwargs=single_version_kwargs)
         p.start()
