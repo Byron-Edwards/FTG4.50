@@ -85,7 +85,7 @@ class MLPActorCritic(nn.Module):
         self.pi = Actor(obs_dim, act_dim, hidden_sizes, activation)
         self.q1 = Critic(obs_dim, act_dim, hidden_sizes, activation)
         self.q2 = Critic(obs_dim, act_dim, hidden_sizes, activation)
-        self.log_alpha = nn.Parameter(torch.zeros(1))
+        self.log_alpha = nn.Parameter(torch.zeros(1), requires_grad=True)
 
     # Set up function for computing SAC Q-losses
     def compute_loss_q(self,data, ac_targ, gamma, alpha):
@@ -188,6 +188,47 @@ class ReplayBuffer:
         return {k: torch.as_tensor(v, dtype=torch.float32).to(device) for k, v in batch.items()}
 
 
+class ReplayBufferOppo:
+    # for single thread or created in the child thread
+    def __init__(self, max_size, oppo_mode= False):
+        self.trajectories = list()
+        self.traj_len = list()
+        self.latent = list()
+        self.oppo_mode = oppo_mode
+        self.max_size = max_size
+
+    def store(self, trajectory,encoder):
+        self.trajectories.append(trajectory)
+        self.traj_len.append(len(trajectory))
+        self.latent.append(encoder(trajectory)[0])
+        if not self.oppo_mode:
+            # as a simple queue
+            if len(self.trajectories) > self.max_size:
+                self.trajectories.pop(0)
+                self.traj_len.pop(0)
+                self.latent.pop(0)
+        else:
+            self.forget()
+
+    def forget(self):
+        pass
+
+    def cluster(self):
+        pass
+
+    def sample_trans(self,batch_size, device=None):
+        indexes = np.arange(len(self.trajectories))
+        prob = self.traj_len
+        sampled_traj_index = np.random.choice(indexes, size=batch_size, replace=True, p=prob)
+        sampled_trans = [np.random.choice(self.trajectories[index]) for index in sampled_traj_index]
+        return sampled_trans
+
+    def sample_traj(self,batch_size, max_seq_len):
+        indexes = np.random.randint(len(self.trajectories), size=batch_size)
+        batch = [self.trajectories[i] for i in indexes]
+        return batch
+
+
 class ReplayBufferShare:
     """
     A simple FIFO experience replay buffer for SAC async version.
@@ -201,7 +242,8 @@ class ReplayBufferShare:
         if len(self.buffer) < self.max_size:
             self.buffer.append(Transition(obs=obs, next_obs=next_obs, action=act, reward=rew, done=done))
         else:
-            self.buffer[self.ptr] = Transition(obs=obs, next_obs=next_obs, action=act, reward=rew, done=done)
+            self.buffer.pop(0)
+            self.buffer.append(Transition(obs=obs, next_obs=next_obs, action=act, reward=rew, done=done))
         self.ptr = (self.ptr + 1) % self.max_size
 
     def store_trajectory(self, trajectory):
@@ -252,8 +294,8 @@ def sac(global_ac, global_ac_targ, rank, T, E, args, scores, wins,buffer, ac_kwa
         p.requires_grad = False
 
     # Experience buffer
-    # replay_buffer = ReplayBuffer(obs_dim=obs_dim, size=replay_size)
-    replay_buffer = ReplayBufferShare(buffer=buffer, size=args.replay_size)
+    replay_buffer = ReplayBuffer(obs_dim=obs_dim, size=args.replay_size)
+    # replay_buffer = ReplayBufferShare(buffer=buffer, size=args.replay_size)
     # if args.traj_dir:
     #     replay_buffer.store_trajectory(load_trajectory(args.traj_dir))
 
@@ -263,13 +305,14 @@ def sac(global_ac, global_ac_targ, rank, T, E, args, scores, wins,buffer, ac_kwa
 
     # Set up optimizers for policy and q-function
     # Async Version
-    pi_optimizer = Adam(global_ac.pi.parameters(), lr=lr)
-    q1_optimizer = Adam(global_ac.q1.parameters(), lr=lr)
-    q2_optimizer = Adam(global_ac.q2.parameters(), lr=lr)
+    pi_optimizer = Adam(global_ac.pi.parameters(), lr=lr, eps=1e-4)
+    q1_optimizer = Adam(global_ac.q1.parameters(), lr=lr, eps=1e-4)
+    q2_optimizer = Adam(global_ac.q2.parameters(), lr=lr, eps=1e-4)
     alpha_optim = Adam([global_ac.log_alpha], lr=lr, eps=1e-4)
 
     # Prepare for interaction with environment
     o, ep_ret, ep_len = env.reset(), 0, 0
+    trajectory = list()
     discard = False
     t = T.value()
     e = E.value()
@@ -298,6 +341,7 @@ def sac(global_ac, global_ac_targ, rank, T, E, args, scores, wins,buffer, ac_kwa
 
         # Store experience to replay buffer
         replay_buffer.store(o, a, r, o2, d)
+        trajectory.append(Transition(obs=o,action=a,reward=r,next_obs=o2,done=d))
 
         # Super critical, easy to overlook step: make sure to update
         # most recent observation!
@@ -327,6 +371,7 @@ def sac(global_ac, global_ac_targ, rank, T, E, args, scores, wins,buffer, ac_kwa
             writer.add_scalar("metrics/round_step", ep_len, e)
             writer.add_scalar("metrics/alpha", alpha, e)
             o, ep_ret, ep_len = env.reset(), 0, 0
+            trajectory = list()
             discard = False
 
         # Update handling
@@ -350,6 +395,7 @@ def sac(global_ac, global_ac_targ, rank, T, E, args, scores, wins,buffer, ac_kwa
                 alpha_loss.backward(retain_graph=False)
                 alpha = max(local_ac.log_alpha.exp().item(), min_alpha) if not fix_alpha else min_alpha
 
+                nn.utils.clip_grad_norm_(local_ac.parameters(), 20)
                 for global_param, local_param in zip(global_ac.parameters(), local_ac.parameters()):
                     global_param._grad = local_param.grad
 
