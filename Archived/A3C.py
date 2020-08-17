@@ -1,5 +1,3 @@
-import gym
-import gym_fightingice
 import pickle
 import torch
 import os
@@ -10,15 +8,15 @@ import torch.nn.functional as F
 import torch.optim as optim
 from torch.distributions import Categorical
 import torch.multiprocessing as mp
-from OpenAI.atari_wrappers import make_ftg_ram
-from model_parameter_trans import state_dict_trans
+from OppModeling.atari_wrappers import make_ftg_ram
+from OppModeling.model_parameter_trans import state_dict_trans
 # from gym_fightingice.envs.Machete import Machete
 # from OpenAI.ByronAI import ActorCriticNumpy
 
 # Hyperparameters
 n_train_processes = 1
 save_interval = 20
-save_dir = "./OpenAI/A3C"
+save_dir = "../OpenAI/A3C"
 numpy_para = "ByronAI.numpy"
 learning_rate = 0.0002
 update_interval = 5

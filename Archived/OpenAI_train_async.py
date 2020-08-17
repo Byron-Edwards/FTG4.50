@@ -1,11 +1,9 @@
 import warnings
-import copy
 import argparse
 import collections
 import time
 import os
 import gym
-import gym_fightingice
 from gym_fightingice.envs.Machete import Machete
 import numpy as np
 import torch
@@ -15,7 +13,7 @@ from torch.autograd import Variable
 from torch.utils.tensorboard import SummaryWriter
 import torch.multiprocessing as mp
 from datetime import datetime
-from OpenAI.atari_wrappers import make_ftg_display
+from OppModeling.atari_wrappers import make_ftg_display
 
 
 Transition = collections.namedtuple('Transition', field_names=[

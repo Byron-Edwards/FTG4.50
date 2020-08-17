@@ -1,17 +1,12 @@
 import math, random
 
-import gym
-import gym_fightingice
-import numpy as np
 import operator
-import signal, functools
 import torch
 import torch.nn as nn
 import torch.optim as optim
-import torch.autograd as autograd
 import torch.nn.functional as F
 from torch.utils.tensorboard import SummaryWriter
-from OpenAI.atari_wrappers import *
+from OppModeling.atari_wrappers import *
 
 class NoisyLinear(nn.Module):
     def __init__(self, in_features, out_features, use_cuda, std_init=0.4):

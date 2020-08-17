@@ -3,10 +3,8 @@ import argparse
 import os
 import numpy as np
 import copy
-import cv2
 # import platform
 import gym
-import gym_fightingice
 import torch
 from torch import multiprocessing as mp
 from time import sleep
@@ -19,8 +17,8 @@ from OpenAI.ACER.model import ActorCritic
 from OpenAI.ACER.optim import SharedRMSprop
 from OpenAI.ACER.memory import EpisodicReplayMemory
 from OpenAI.ACER.utils import Counter
-from ACER_train import off_policy_train
-from ACER_train import actor
+from Archived.ACER_train import off_policy_train
+from Archived.ACER_train import actor
 
 
 parser = argparse.ArgumentParser(description='ACER')
@@ -116,7 +114,7 @@ if __name__ == '__main__':
     writer = SummaryWriter(log_dir=tensorboard_dir)
 
     # Create model for both learner and actor
-    env = gym.make(args.env, java_env_path=".", port=args.port, p2=args.p2)
+    env = gym.make(args.env, java_env_path="..", port=args.port, p2=args.p2)
     memory = EpisodicReplayMemory(args.memory_capacity, args.max_episode_length)
     model = ActorCritic(env.observation_space, env.action_space, args.hidden_size)
     shared_model = copy.deepcopy(model)

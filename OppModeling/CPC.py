@@ -1,44 +1,23 @@
-import random
 import time
 import logging
-import os
 import argparse
 import numpy as np
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 import torch.optim as optim
-from torch.utils import data
 from timeit import default_timer as timer
+from OppModeling.utils import mlp
 
 
 class CDCK2(nn.Module):
-    def __init__(self, timestep, obs_dim, latent_dim, c_dim):
-
+    def __init__(self, timestep, obs_dim, hidden_sizes,z_dim, c_dim):
         super(CDCK2, self).__init__()
         self.timestep = timestep
         self.c_dim = c_dim
-        self.latent_dim = latent_dim
-        # self.encoder = nn.Sequential(
-        #     nn.Conv1d(1, 512, kernel_size=10, stride=5, padding=3, bias=False),
-        #     nn.BatchNorm1d(512),
-        #     nn.ReLU(inplace=True),
-        #     nn.Conv1d(512, 512, kernel_size=8, stride=4, padding=2, bias=False),
-        #     nn.BatchNorm1d(512),
-        #     nn.ReLU(inplace=True),
-        #     nn.Conv1d(512, 512, kernel_size=4, stride=2, padding=1, bias=False),
-        #     nn.BatchNorm1d(512),
-        #     nn.ReLU(inplace=True),
-        #     nn.Conv1d(512, 512, kernel_size=4, stride=2, padding=1, bias=False),
-        #     nn.BatchNorm1d(512),
-        #     nn.ReLU(inplace=True),
-        #     nn.Conv1d(512, 512, kernel_size=4, stride=2, padding=1, bias=False),
-        #     nn.BatchNorm1d(512),
-        #     nn.ReLU(inplace=True)
-        # )
-        self.encoder = nn.GRU(obs_dim, latent_dim, num_layers=1, bidirectional=False, batch_first=True)
-        self.gru = nn.GRU(latent_dim, c_dim, num_layers=1, bidirectional=False, batch_first=True)
-        self.Wk = nn.ModuleList([nn.Linear(c_dim, latent_dim) for i in range(timestep)])
+        self.z_dim = z_dim
+        self.encoder = mlp([obs_dim] + list(hidden_sizes) + [z_dim], nn.ReLU, nn.Identity)
+        self.gru = nn.GRU(z_dim, c_dim, num_layers=1, bidirectional=False, batch_first=True)
+        self.Wk = nn.ModuleList([nn.Linear(c_dim, z_dim) for i in range(timestep)])
         self.softmax = nn.Softmax()
         self.lsoftmax = nn.LogSoftmax()
 
@@ -65,23 +44,23 @@ class CDCK2(nn.Module):
         else:
             return torch.zeros(1, batch_size, feature_dim)
 
-    def forward(self, x, encoder_hidden, c_hidden):
+    def forward(self, x, c_hidden):
         batch = x.size()[0]
         seq_len = x.size()[1]
         # no Down sampling in RL
         t_samples = torch.randint(seq_len - self.timestep, size=(1,)).long()  # randomly pick time stamps
         # input sequence is N*C*L, e.g. 8*1*20480
-        z, encoder_hidden = self.encoder(x, encoder_hidden)
+        z = self.encoder(x)
         # Do not need transpose as the input shape is N*L*C
         # z = z.transpose(1, 2)
         nce = 0  # average over timestep and batch
-        encode_samples = torch.empty((self.timestep, batch, self.latent_dim)).float()  # e.g. size 12*8*512
+        encode_samples = torch.empty((self.timestep, batch, self.z_dim)).float()  # e.g. size 12*8*512
         for i in np.arange(1, self.timestep + 1):
-            encode_samples[i - 1] = z[:, t_samples + i, :].view(batch, self.latent_dim)  # z_tk e.g. size 8*512
+            encode_samples[i - 1] = z[:, t_samples + i, :].view(batch, self.z_dim)  # z_tk e.g. size 8*512
         forward_seq = z[:, :t_samples + 1, :]  # e.g. size 8*100*512
         output, c_hidden = self.gru(forward_seq, c_hidden)  # output size e.g. 8*100*256
         c_t = output[:, t_samples, :].view(batch, self.c_dim)  # c_t e.g. size 8*256
-        pred = torch.empty((self.timestep, batch, self.latent_dim)).float()  # e.g. size 12*8*512
+        pred = torch.empty((self.timestep, batch, self.z_dim)).float()  # e.g. size 12*8*512
         for i in np.arange(0, self.timestep):
             linear = self.Wk[i]
             pred[i] = linear(c_t)  # Wk*c_t e.g. size 8*512
@@ -95,15 +74,25 @@ class CDCK2(nn.Module):
 
         return accuracy, nce, c_hidden
 
+    @torch.no_grad()
+    def predict(self, x, c_hidden):
+        batch = x.size()[0]
+        # input sequence is N*C*L, e.g. 8*1*20480
+        z = self.encoder(x)
+        # encoded sequence is N*C*L, e.g. 8*512*128
+        # reshape to N*L*C for GRU, e.g. 8*128*512
+        output, c_hidden = self.gru(z, c_hidden)# output size e.g. 8*128*256
+        return output, c_hidden # return every frame
+        #return output[:,-1,:], hidden # only return the last frame per utt
+
 
 def train(args, model, device, train_loader, optimizer, epoch, batch_size):
     model.train()
     for batch_idx, data in enumerate(train_loader):
         data = data.float().unsqueeze(1).to(device)  # add channel dimension
         optimizer.zero_grad()
-        encoder_hidden = model.init_hidden(len(data), args.latent_dim, use_gpu=True)
         c_hidden = model.init_hidden(len(data), args.c_dim, use_gpu=True)
-        acc, loss, hidden = model(data,encoder_hidden,c_hidden)
+        acc, loss, hidden = model(data, c_hidden)
 
         loss.backward()
         # add gradient clipping
@@ -193,7 +182,7 @@ def main():
     parser.add_argument('--timestep', type=int, default=12)
     parser.add_argument('--batch-size', type=int, default=64,
                         help='batch size')
-    parser.add_argument('--latent_dim', type=int, default=64,
+    parser.add_argument('--z_dim', type=int, default=64,
                         help='batch size')
     parser.add_argument('--c_dim', type=int, default=32,
                         help='batch size')

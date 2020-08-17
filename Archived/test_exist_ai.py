@@ -51,7 +51,7 @@ for i in fileNames:
         aiNames.append(i.split(".")[0])
 
 f = open("test_results.txt", "a")
-envs = [gym.make("FightingiceDataNoFrameskip-v0", java_env_path=".",port=4000+i) for i in range(len(aiNames))]
+envs = [gym.make("FightingiceDataNoFrameskip-v0", java_env_path="..", port=4000 + i) for i in range(len(aiNames))]
 
 for env, ainame in zip(envs,aiNames):
     try:

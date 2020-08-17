@@ -1,7 +1,5 @@
-import gym
 import os
 import time
-import itertools
 import numpy as np
 import torch
 import torch.nn as nn
@@ -10,8 +8,8 @@ from torch.optim import Adam
 from torch.distributions import Categorical
 from copy import deepcopy
 from spinup.utils.logx import EpochLogger
-from OpenAI.atari_wrappers import make_ftg_ram
-from model_parameter_trans import state_dict_trans
+from OppModeling.atari_wrappers import make_ftg_ram
+from OppModeling.model_parameter_trans import state_dict_trans
 
 
 def combined_shape(length, shape=None):

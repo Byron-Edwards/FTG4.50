@@ -1,13 +1,13 @@
 import numpy as np
 import os
-os.environ.setdefault('PATH', '')
-from collections import deque
+import cv2
 import gym
-
 import gym_fightingice
 import signal
+from collections import deque
 from gym import spaces
-import cv2
+
+os.environ.setdefault('PATH', '')
 cv2.ocl.setUseOpenCL(False)
 
 
@@ -25,6 +25,7 @@ class timeout:
 
     def __exit__(self, type, value, traceback):
         signal.alarm(0)
+
 
 class TimeLimit(gym.Wrapper):
     def __init__(self, env, max_episode_steps=None):
@@ -54,6 +55,7 @@ class ClipActionsWrapper(gym.Wrapper):
 
     def reset(self, **kwargs):
         return self.env.reset(**kwargs)
+
 
 class NoopResetEnv(gym.Wrapper):
     def __init__(self, env, noop_max=30):
@@ -103,6 +105,7 @@ class FireResetEnv(gym.Wrapper):
 
     def step(self, ac):
         return self.env.step(ac)
+
 
 class EpisodicLifeEnv(gym.Wrapper):
     def __init__(self, env):

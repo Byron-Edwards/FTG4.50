@@ -61,7 +61,7 @@ if __name__ == "__main__":
     device = torch.device("cuda" if args.cuda else "cpu")
 
     # wappers of env
-    env = gym.make("FightingiceDataNoFrameskip-v0", java_env_path=".", port=4001)
+    env = gym.make("FightingiceDataNoFrameskip-v0", java_env_path="..", port=4001)
 
 
     # init policyNet and targetNet

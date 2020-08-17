@@ -184,7 +184,7 @@ def actor(rank, args, T, BEST, memory_queue, model_queue,p2):
     # resource.setrlimit(resource.RLIMIT_NOFILE, (args.nofile, rlimit[1]))
     torch.manual_seed(args.seed + rank)
     print("Process {} fighting with {}".format(rank, p2))
-    env = gym.make(args.env, java_env_path=".", port=args.port + rank * 2, p2=p2)
+    env = gym.make(args.env, java_env_path="..", port=args.port + rank * 2, p2=p2)
     env.seed(args.seed + rank)
     model = ActorCritic(env.observation_space, env.action_space, args.hidden_size)
     shared_average_model = ActorCritic(env.observation_space, env.action_space, args.hidden_size)

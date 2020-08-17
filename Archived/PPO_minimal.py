@@ -131,7 +131,7 @@ class timeout:
 
 
 def main():
-    env = gym.make(env_name, java_env_path=".", port=port, p2=p2)
+    env = gym.make(env_name, java_env_path="..", port=port, p2=p2)
     tensorboard_dir = os.path.join(save_dir, 'checkpoint', "runs", datetime.now().strftime("%Y%m%d-%H%M%S"))
     if not os.path.exists(tensorboard_dir):
         os.makedirs(tensorboard_dir)

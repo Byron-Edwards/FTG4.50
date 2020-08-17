@@ -1,15 +1,8 @@
-import gym
-import gym_fightingice
 import random
-import collections
-import signal, functools
 import torch
 import argparse
 import copy
-import os
 import math
-import numpy as np
-from time import sleep
 import torch.nn as nn
 import torch.multiprocessing as mp
 import torch.nn.functional as F
@@ -18,8 +11,7 @@ import itertools
 from datetime import datetime
 from torch.utils.tensorboard import SummaryWriter
 from torch.distributions import Categorical
-from collections import deque, namedtuple
-from OpenAI.atari_wrappers import *
+from OppModeling.atari_wrappers import *
 # Characteristics
 # 1. Discrete action space, single thread version.
 # 2. Does not support trust-region updates.
@@ -323,7 +315,7 @@ def train(model, average_model, t, optimizer, memory, on_policy=False, device=to
 def actor(rank, args, T,memory_queue,model_queue,p2):
     torch.manual_seed(args.seed + rank)
     # env = FrameStack(gym.make(args.env), 4)
-    env = gym.make(args.env, java_env_path=".", port=args.port + rank * 2, p2=p2)
+    env = gym.make(args.env, java_env_path="..", port=args.port + rank * 2, p2=p2)
     print("Process {} fighting with {}".format(rank, p2))
     env.seed(args.seed + rank)
     model = ActorCritic(env.observation_space.shape[0], env.action_space,args.hidden_size)
@@ -422,7 +414,7 @@ if __name__ == '__main__':
     memory = ReplayBuffer()
     writer = SummaryWriter(log_dir=tensorboard_dir)
     # env = make_env(args.env)
-    env = gym.make(args.env, java_env_path=".", port=args.port, p2=args.p2)
+    env = gym.make(args.env, java_env_path="..", port=args.port, p2=args.p2)
     model = ActorCritic(env.observation_space.shape[0], env.action_space, args.hidden_size)
     shared_model = copy.deepcopy(model)
     model.to(device)

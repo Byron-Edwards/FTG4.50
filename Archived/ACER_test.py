@@ -15,9 +15,9 @@ from OpenAI.ACER.utils import state_to_tensor, plot_line
 
 def test(rank, args, T, shared_model):
     torch.manual_seed(args.seed + rank)
-    writer = SummaryWriter(log_dir="./OpenAI/ACER/", comment="-ACER-" + args.env + "-" + args.p2)
+    writer = SummaryWriter(log_dir="../OpenAI/ACER/", comment="-ACER-" + args.env + "-" + args.p2)
 
-    env = gym.make(args.env, java_env_path=".", port=args.port + rank * 2)
+    env = gym.make(args.env, java_env_path="..", port=args.port + rank * 2)
     env.seed(args.seed + rank)
     model = ActorCritic(env.observation_space, env.action_space, args.hidden_size)
     model.eval()
