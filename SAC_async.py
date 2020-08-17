@@ -221,11 +221,21 @@ class ReplayBufferOppo:
         prob = self.traj_len
         sampled_traj_index = np.random.choice(indexes, size=batch_size, replace=True, p=prob)
         sampled_trans = [np.random.choice(self.trajectories[index]) for index in sampled_traj_index]
-        return sampled_trans
+        obs_buf,obs2_buf,act_buf,rew_buf,done_buf = [],[],[],[],[]
+        for trans in sampled_trans:
+            obs_buf.append(trans.obs)
+            obs2_buf.append(trans.next_obs)
+            act_buf.append(trans.action)
+            rew_buf.append(trans.reward)
+            done_buf.append(trans.done)
+        batch = dict(obs=obs_buf,obs2=obs2_buf,act=act_buf,rew=rew_buf,done=done_buf)
+        return {k: torch.as_tensor(v, dtype=torch.float32).to(device) for k, v in batch.items()}
 
     def sample_traj(self,batch_size, max_seq_len):
         indexes = np.random.randint(len(self.trajectories), size=batch_size)
-        batch = [self.trajectories[i] for i in indexes]
+        min_len = [self.traj_len[i] for i in indexes]
+        # cut off using the min length
+        batch = [self.trajectories[i][:min_len] for i in indexes]
         return batch
 
 
