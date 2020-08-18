@@ -6,7 +6,6 @@ from torch.optim import Adam
 from torch.utils.tensorboard import SummaryWriter
 from OppModeling.SAC import MLPActorCritic
 from OppModeling.ReplayBuffer import ReplayBuffer, ReplayBufferOppo, ReplayBufferShare
-from OppModeling.CPC import CDCK2
 from OppModeling.atari_wrappers import make_ftg_ram,make_ftg_ram_nonstation
 from OppModeling.model_parameter_trans import state_dict_trans
 
@@ -61,7 +60,7 @@ def sac(global_ac, global_ac_targ, rank, T, E, args, scores, wins,buffer, device
     t = T.value()
     e = E.value()
     # Main loop: collect experience in env and update/log each epoch
-    while e <= args.total_episode:
+    while e <= args.episode:
 
         # Until start_steps have elapsed, randomly sample actions
         # from a uniform distribution for better exploration. Afterwards,
@@ -167,7 +166,7 @@ def sac(global_ac, global_ac_targ, rank, T, E, args, scores, wins,buffer, device
             print("Saving model at episode:{}".format(t))
 
 
-def sac_opp(global_ac, global_ac_targ, rank, T, E, args, scores, wins, buffer, device=None, tensorboard_dir=None, ):
+def sac_opp(global_ac, global_ac_targ, global_cpc, rank, T, E, args, scores, wins, buffer, device=None, tensorboard_dir=None, ):
     torch.manual_seed(args.seed + rank)
     np.random.seed(args.seed + rank)
     # writer = GlobalSummaryWriter.getSummaryWriter()
@@ -183,16 +182,14 @@ def sac_opp(global_ac, global_ac_targ, rank, T, E, args, scores, wins, buffer, d
     obs_dim = env.observation_space.shape[0]
     act_dim = env.action_space.n
     print("set up child process env")
-    local_ac = MLPActorCritic(obs_dim, act_dim, **dict(hidden_sizes=[args.hid] * args.l)).to(device)
+    local_ac = MLPActorCritic(obs_dim+args.c_dim, act_dim, **dict(hidden_sizes=[args.hid] * args.l)).to(device)
     local_ac.load_state_dict(global_ac.state_dict())
-    local_cpc = CDCK2(timestep, obs_dim, z_dim, c_dim)
-    local_cpc.load_state_dict(global_cpc.state_dict())
     print("local ac load global ac")
 
     for p in global_ac_targ.parameters():
         p.requires_grad = False
 
-    replay_buffer = ReplayBufferOppo(max_size=args.replay_size,encoder=local_cpc)
+    replay_buffer = ReplayBufferOppo(max_size=args.replay_size,encoder=global_cpc)
 
     # Entropy Tuning
     target_entropy = -torch.prod(torch.Tensor(env.action_space.shape).to(device)).item()  # heuristic value from the paper
@@ -201,17 +198,22 @@ def sac_opp(global_ac, global_ac_targ, rank, T, E, args, scores, wins, buffer, d
     pi_optimizer = Adam(global_ac.pi.parameters(), lr=args.lr, eps=1e-4)
     q1_optimizer = Adam(global_ac.q1.parameters(), lr=args.lr, eps=1e-4)
     q2_optimizer = Adam(global_ac.q2.parameters(), lr=args.lr, eps=1e-4)
+    cpc_optimizer = Adam(global_cpc.parameters(), lr=args.lr, eps=1e-4)
     alpha_optim = Adam([global_ac.log_alpha], lr=args.lr, eps=1e-4)
 
+
     # Prepare for interaction with environment
+    c_hidden = global_cpc.init_hidden(1, args.c_dim)
     o, ep_ret, ep_len = env.reset(), 0, 0
+    c, c_hidden = global_cpc.predict(o, c_hidden)
     trajectory = list()
     discard = False
+    local_t,local_e = 0,0
     t = T.value()
     e = E.value()
-    while e <= args.total_episode:
+    while e <= args.episode:
         if t > args.start_steps:
-            a = local_ac.get_action(o, device=device)
+            a = local_ac.get_action(o + c.squeeze(), device=device)
         else:
             a = env.action_space.sample()
 
@@ -226,19 +228,21 @@ def sac_opp(global_ac, global_ac_targ, rank, T, E, args, scores, wins, buffer, d
         # horizon (that is, when it's an artificial terminal signal
         # that isn't based on the agent's state)
         d = False if (ep_len == args.max_ep_len) or discard else d
-
-        trajectory.append(dict(obs=o, action=a, reward=r, next_obs=o2, done=d,latent=None))
+        trajectory.append([o, a, r, o2, d, c])
 
         # Super critical, easy to overlook step: make sure to update
         # most recent observation!
         o = o2
+        c, c_hidden = global_cpc.predict(o, c_hidden)
 
         T.increment()
+        local_t += 1
         t = T.value()
         # End of trajectory handling
         if d or (ep_len == args.max_ep_len) or discard:
             replay_buffer.store(trajectory)
             E.increment()
+            local_e += 1
             e = E.value()
             # logger.store(EpRet=ep_ret, EpLen=ep_len)
             if info.get('win', False):
@@ -256,12 +260,23 @@ def sac_opp(global_ac, global_ac_targ, rank, T, E, args, scores, wins, buffer, d
             writer.add_scalar("metrics/win_rate", win_rate.item(), e)
             writer.add_scalar("metrics/round_step", ep_len, e)
             writer.add_scalar("metrics/alpha", alpha, e)
+            c_hidden = global_cpc.init_hidden(1, args.c_dim)
             o, ep_ret, ep_len = env.reset(), 0, 0
             trajectory = list()
             discard = False
 
-        # CPC update handing
-
+            # CPC update handing
+            if local_e > args.batch_size and local_e % args.update_every == 0:
+                data, indexes = replay_buffer.sample_traj(args.batch_size)
+                global_cpc.train()
+                cpc_optimizer.zero_grad()
+                c_hidden = global_cpc.init_hidden(len(data), args.c_dim, use_gpu=True)
+                acc, loss, c_hidden, output = global_cpc(data, c_hidden)
+                replay_buffer.update_latent(indexes, output.detach())
+                loss.backward()
+                # add gradient clipping
+                nn.utils.clip_grad_norm(global_cpc.parameters(), 20)
+                cpc_optimizer.step()
 
         # SAC Update handling
         if t >= args.update_after and t % args.update_every == 0:
@@ -308,6 +323,7 @@ def sac_opp(global_ac, global_ac_targ, rank, T, E, args, scores, wins, buffer, d
 
         if t % args.save_freq == 0 and t > 0:
             torch.save(global_ac.state_dict(), os.path.join(args.save_dir, args.exp_name, args.model_para))
+            torch.save(global_cpc.state_dict(), os.path.join(args.save_dir, args.exp_name, args.cpc_para))
             state_dict_trans(global_ac.state_dict(), os.path.join(args.save_dir, args.exp_name,  args.numpy_para))
             torch.save((e, t, list(scores), list(wins)), os.path.join(args.save_dir, args.exp_name, args.train_indicator))
             print("Saving model at episode:{}".format(t))

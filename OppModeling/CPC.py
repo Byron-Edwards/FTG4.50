@@ -44,13 +44,25 @@ class CDCK2(nn.Module):
         else:
             return torch.zeros(1, batch_size, feature_dim)
 
-    def forward(self, x, c_hidden):
+    def get_z(self, x):
+        if len(x.shape) == 1:
+            x = np.expand_dims(x, axis=0)
+        if len(x.shape) == 2:
+            x = np.expand_dims(x, axis=0)
         batch = x.size()[0]
         seq_len = x.size()[1]
-        # no Down sampling in RL
-        t_samples = torch.randint(seq_len - self.timestep, size=(1,)).long()  # randomly pick time stamps
+        obs_dim = x.size()[2]
+        z = torch.empty((batch, seq_len, obs_dim)).float()  # e.g. size 12*8*512
+        for i in np.arange(seq_len):
+            z[i] = self.encoder(x[:, i, :]).view(batch,obs_dim)
+        return z, batch, seq_len, obs_dim
+
+    def forward(self, x, c_hidden):
         # input sequence is N*C*L, e.g. 8*1*20480
-        z = self.encoder(x)
+        z, batch, seq_len, obs_dim = self.get_z(x)
+        # no Down sampling in RL
+        assert self.timestep < seq_len
+        t_samples = torch.randint(seq_len - self.timestep, size=(1,)).long()  # randomly pick time stamps
         # Do not need transpose as the input shape is N*L*C
         # z = z.transpose(1, 2)
         nce = 0  # average over timestep and batch
@@ -72,18 +84,13 @@ class CDCK2(nn.Module):
         nce /= -1. * batch * self.timestep
         accuracy = 1. * correct.item() / batch
 
-        return accuracy, nce, c_hidden
+        return accuracy, nce, c_hidden, output # return output to update the latent value of the buffer
 
     @torch.no_grad()
     def predict(self, x, c_hidden):
-        batch = x.size()[0]
-        # input sequence is N*C*L, e.g. 8*1*20480
-        z = self.encoder(x)
-        # encoded sequence is N*C*L, e.g. 8*512*128
-        # reshape to N*L*C for GRU, e.g. 8*128*512
+        z, _, _, _ = self.get_z(x)
         output, c_hidden = self.gru(z, c_hidden)# output size e.g. 8*128*256
         return output, c_hidden # return every frame
-        #return output[:,-1,:], hidden # only return the last frame per utt
 
 
 def train(args, model, device, train_loader, optimizer, epoch, batch_size):
@@ -99,10 +106,6 @@ def train(args, model, device, train_loader, optimizer, epoch, batch_size):
         nn.utils.clip_grad_norm(model.parameters(), 20)
         optimizer.step()
         lr = optimizer.update_learning_rate()
-        if batch_idx % args.log_interval == 0:
-            logging.info('Train Epoch: {} [{}/{} ({:.0f}%)]\tlr:{:.5f}\tAccuracy: {:.4f}\tLoss: {:.6f}'.format(
-                epoch, batch_idx * len(data), len(train_loader.dataset),
-                       100. * batch_idx / len(train_loader), lr, acc, loss.item()))
 
 
 def validation(args, model, device, data_loader, batch_size):

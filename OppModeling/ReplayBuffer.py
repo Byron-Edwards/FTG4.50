@@ -2,8 +2,6 @@ import torch
 import numpy as np
 from OppModeling.utils import combined_shape
 
-fields = ('obs', 'next_obs', 'action', 'reward', 'done', 'latent')
-
 
 class ReplayBuffer:
     """
@@ -31,7 +29,7 @@ class ReplayBuffer:
         for i in trajectory:
             self.store(i["obs"], i["action"], i["reward"], i["next_obs"], i["done"])
 
-    def sample_batch(self, batch_size=32,device=None):
+    def sample_batch(self, batch_size=32, device=None):
         idxs = np.random.randint(0, self.size, size=batch_size)
         batch = dict(obs=self.obs_buf[idxs],
                      obs2=self.obs2_buf[idxs],
@@ -74,52 +72,58 @@ class ReplayBufferShare:
 
 class ReplayBufferOppo:
     # for single thread or created in the child thread
-    def __init__(self, max_size, encoder):
+    def __init__(self, max_size, encoder, obs_dim):
         self.trajectories = list()
         self.traj_len = list()
         self.encoder = encoder
-        self.z_dim = self.encoder.z_dim
+        self.obs_dim = obs_dim
         self.c_dim = self.encoder.c_dim
         self.max_size = max_size
 
     def store(self, trajectory):
         self.trajectories.append(trajectory)
         self.traj_len.append(len(trajectory))
-        self.forget()
+        if len(self.trajectories) >= self.max_size:
+            self.forget()
 
     def forget(self):
-        pass
+        self.trajectories.pop(0)
+        self.traj_len.pop(0)
 
     def cluster(self):
         pass
 
-    def update_latent(self, trajectories, use_gpu=True):
-        batch_size = len(trajectories)
-        for trans in trajectories:
-            z_hidden = self.encoder.init_hidden(batch_size, self.z_dim, use_gpu=True)
-            c_hidden = self.encoder.init_hidden(batch_size, self.c_dim, use_gpu=True)
-        output, encoder_hidden, c_hidden = self.encoder.pre
-
     def sample_trans(self, batch_size, device=None):
         indexes = np.arange(len(self.trajectories))
         prob = self.traj_len
+        sampled_trans = []
         sampled_traj_index = np.random.choice(indexes, size=batch_size, replace=True, p=prob)
-        sampled_trans = [np.random.choice(self.trajectories[index]) for index in sampled_traj_index]
-        obs_buf, obs2_buf, act_buf, rew_buf, done_buf = [],[],[],[],[]
+        for index in sampled_traj_index:
+            sampled_trans.append(np.random.choice(self.trajectories[index]))
+        obs_buf, obs2_buf, act_buf, rew_buf, done_buf = [], [], [], [], []
         for trans in sampled_trans:
-            obs_buf.append(trans["obs"] + trans["latent"])
-            obs2_buf.append(trans["next_obs"])
-            act_buf.append(trans["action"])
-            rew_buf.append(trans["reward"])
-            done_buf.append(trans["done"])
-        batch = dict(obs=obs_buf, obs2=obs2_buf, act=act_buf, rew=rew_buf,done=done_buf)
+            obs_buf.append(trans[0] + trans[-1])
+            obs2_buf.append(trans[3])
+            act_buf.append(trans[1])
+            rew_buf.append(trans[2])
+            done_buf.append(trans[4])
+        batch = dict(obs=obs_buf, obs2=obs2_buf, act=act_buf, rew=rew_buf, done=done_buf)
         return {k: torch.as_tensor(v, dtype=torch.float32).to(device) for k, v in batch.items()}
 
-    def sample_traj(self,batch_size, max_seq_len):
+    # This function sample batch of trace  for  CPC training, only return the batch of obs
+    def sample_traj(self, batch_size):
         indexes = np.random.randint(len(self.trajectories), size=batch_size)
-        min_len = [self.traj_len[i] for i in indexes]
+        min_len = min([self.traj_len[i] for i in indexes])
         # cut off using the min length
-        batch = [self.trajectories[i][:min_len] for i in indexes]
-        return batch
+        batch = []
+        for i in indexes:
+            batch.append([self.trajectories[i][j][0] for j in range(min_len)])
+        batch = np.array(batch, dtype=np.float)
+        assert batch.shape == (batch_size, min_len, self.obs_dim)
+        return batch, indexes, min_len
 
-
+    # currently can only update the trans index less than min
+    def update_latent(self, indexes, min_len, outputs):
+        for i, index in enumerate(indexes):
+            for j in range(min_len):
+                self.trajectories[index][j][-1] = outputs[i][j]
