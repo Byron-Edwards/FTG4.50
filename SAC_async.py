@@ -9,36 +9,47 @@ from copy import deepcopy
 from OppModeling.atari_wrappers import make_ftg_ram,make_ftg_ram_nonstation
 from OppModeling.utils import Counter,count_vars
 from OppModeling.SAC import MLPActorCritic
-from OppModeling.train_sac import sac
+from OppModeling.CPC import CPC
+from OppModeling.train_sac import sac,sac_opp
+from python.machete import Machete
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    # parser.add_argument('--env', type=str, default="CartPole-v0")
-    parser.add_argument('--env', type=str, default="FightingiceDataFrameskip-v0")
+    # running setting
     parser.add_argument('--cuda', default=False, action='store_true')
-    parser.add_argument('--p2', type=str, default="ReiwaThunder")
+    parser.add_argument('--seed', '-s', type=int, default=0)
+    parser.add_argument('--n_process', type=int, default=8)
+    # basic env setting
+    parser.add_argument('--env', type=str, default="FightingiceDataFrameskip-v0")
+    parser.add_argument('--p2', type=str, default="Toothless")
+    # non station agent settings
     parser.add_argument('--non_station', default=False, action='store_true')
     parser.add_argument('--stable', default=False, action='store_true')
     parser.add_argument('--station_rounds', type=int, default=1000)
-    parser.add_argument('--replay_size', type=int, default=1000)
     parser.add_argument('--list', nargs='+')
-    parser.add_argument('--hid', type=int, default=256)
+    # training setting
+    parser.add_argument('--replay_size', type=int, default=1000)
     parser.add_argument('--batch_size', type=int, default=256)
+    parser.add_argument('--hid', type=int, default=256)
+    parser.add_argument('--l', type=int, default=2, help="layers")
+    parser.add_argument('--episode', type=int, default=100000)
     parser.add_argument('--start_steps', type=int, default=1000)
     parser.add_argument('--update_after', type=int, default=1000)
     parser.add_argument('--update_every', type=int, default=1)
     parser.add_argument('--max_ep_len', type=int, default=1000)
     parser.add_argument('--min_alpha', type=float, default=0.3)
     parser.add_argument('--fix_alpha', default=False, action="store_true")
-    parser.add_argument('--l', type=int, default=2)
     parser.add_argument('--gamma', type=float, default=0.99)
     parser.add_argument('--lr', type=float, default=1e-4)
     parser.add_argument('--polyak', type=float, default=0.995)
-    parser.add_argument('--seed', '-s', type=int, default=0)
-    parser.add_argument('--episode', type=int, default=100000)
-    parser.add_argument('--exp_name', type=str, default='test')
-    parser.add_argument('--n_process', type=int, default=8)
+    # CPC setting
+    parser.add_argument('--cpc', default=False, action="store_true")
+    parser.add_argument('--z_dim', type=int, default=64)
+    parser.add_argument('--c_dim', type=int, default=32)
+    parser.add_argument('--timestep', type=int, default=5)
+    # Saving settings
     parser.add_argument('--save_freq', type=int, default=1000)
+    parser.add_argument('--exp_name', type=str, default='test')
     parser.add_argument('--save-dir', type=str, default="./experiments")
     parser.add_argument('--traj_dir', type=str, default="./experiments")
     parser.add_argument('--model_para', type=str, default="test_sac.torch")
@@ -70,7 +81,11 @@ if __name__ == '__main__':
         env = make_ftg_ram_nonstation(args.env, p2_list=args.list, total_episode=args.station_rounds, stable=args.stable)
     obs_dim = env.observation_space.shape[0]
     act_dim = env.action_space.n
-    global_ac = MLPActorCritic(obs_dim, act_dim, **ac_kwargs)
+    if args.cpc:
+        global_ac = MLPActorCritic(obs_dim+args.c_dim, act_dim, **ac_kwargs)
+    else:
+        global_ac = MLPActorCritic(obs_dim, act_dim, **ac_kwargs)
+    global_cpc = CPC(timestep=args.timestep, obs_dim=obs_dim, hidden_sizes=[args.hid] * args.l, z_dim=args.z_dim, c_dim=args.c_dim)
 
     # async training setup
     T = Counter()
@@ -95,21 +110,25 @@ if __name__ == '__main__':
     del env
     global_ac.share_memory()
     global_ac_targ.share_memory()
+    global_cpc.share_memory()
     if args.cuda:
         global_ac.to(device)
         global_ac_targ.to(device)
+        global_cpc.to(device)
     var_counts = tuple(count_vars(module) for module in [global_ac.pi, global_ac.q1, global_ac.q2])
     print('\nNumber of parameters: \t pi: %d, \t q1: %d, \t q2: %d\n' % var_counts)
 
     processes = []
-    for rank in range(args.n_process):  # + 1 for test process
-        # if rank == 0:
-            # p = mp.Process(target=test, args=(global_model,))
-        # else:
-        single_version_kwargs = dict(device=device, tensorboard_dir=tensorboard_dir)
-        p = mp.Process(target=sac,
-                       args=(global_ac, global_ac_targ, rank, T, E, args, scores, wins, buffer),
-                       kwargs=single_version_kwargs)
+    for rank in range(args.n_process):
+        if args.cpc:
+            train_func = sac_opp
+            n_args = (global_ac, global_ac_targ, global_cpc, rank, T, E, args, scores, wins, buffer)
+        else:
+            train_func = sac
+            n_args = (global_ac, global_ac_targ, rank, T, E, args, scores, wins, buffer)
+        kwargs = dict(device=device, tensorboard_dir=tensorboard_dir)
+
+        p = mp.Process(target=train_func, args=n_args, kwargs=kwargs)
         p.start()
         time.sleep(5)
         processes.append(p)

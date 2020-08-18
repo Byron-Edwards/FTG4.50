@@ -9,9 +9,9 @@ from timeit import default_timer as timer
 from OppModeling.utils import mlp
 
 
-class CDCK2(nn.Module):
+class CPC(nn.Module):
     def __init__(self, timestep, obs_dim, hidden_sizes,z_dim, c_dim):
-        super(CDCK2, self).__init__()
+        super(CPC, self).__init__()
         self.timestep = timestep
         self.c_dim = c_dim
         self.z_dim = z_dim
@@ -45,16 +45,17 @@ class CDCK2(nn.Module):
             return torch.zeros(1, batch_size, feature_dim)
 
     def get_z(self, x):
+        x = torch.tensor(x, dtype=torch.float32)
         if len(x.shape) == 1:
-            x = np.expand_dims(x, axis=0)
+            x = x.unsqueeze(dim=0)
         if len(x.shape) == 2:
-            x = np.expand_dims(x, axis=0)
+            x = x.unsqueeze(dim=0)
         batch = x.size()[0]
         seq_len = x.size()[1]
         obs_dim = x.size()[2]
-        z = torch.empty((batch, seq_len, obs_dim)).float()  # e.g. size 12*8*512
-        for i in np.arange(seq_len):
-            z[i] = self.encoder(x[:, i, :]).view(batch,obs_dim)
+        z = torch.empty((batch, seq_len, self.z_dim)).float()  # e.g. size 12*8*512
+        for i in range(seq_len):
+            z[i] = self.encoder(x[:, i, :])
         return z, batch, seq_len, obs_dim
 
     def forward(self, x, c_hidden):
@@ -204,7 +205,7 @@ def main():
     print('use_cuda is', use_cuda)
     global_timer = timer()  # global timer
     device = torch.device("cuda" if use_cuda else "cpu")
-    model = CDCK2(args.timestep, args.batch_size, args.audio_window).to(device)
+    model = CPC(args.timestep, args.batch_size, args.audio_window).to(device)
     ## Loading the dataset
     params = {'num_workers': 0,
               'pin_memory': False} if use_cuda else {}

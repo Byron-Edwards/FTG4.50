@@ -189,7 +189,7 @@ def sac_opp(global_ac, global_ac_targ, global_cpc, rank, T, E, args, scores, win
     for p in global_ac_targ.parameters():
         p.requires_grad = False
 
-    replay_buffer = ReplayBufferOppo(max_size=args.replay_size,encoder=global_cpc)
+    replay_buffer = ReplayBufferOppo(obs_dim=obs_dim,max_size=args.replay_size,encoder=global_cpc)
 
     # Entropy Tuning
     target_entropy = -torch.prod(torch.Tensor(env.action_space.shape).to(device)).item()  # heuristic value from the paper
@@ -201,9 +201,8 @@ def sac_opp(global_ac, global_ac_targ, global_cpc, rank, T, E, args, scores, win
     cpc_optimizer = Adam(global_cpc.parameters(), lr=args.lr, eps=1e-4)
     alpha_optim = Adam([global_ac.log_alpha], lr=args.lr, eps=1e-4)
 
-
     # Prepare for interaction with environment
-    c_hidden = global_cpc.init_hidden(1, args.c_dim)
+    c_hidden = global_cpc.init_hidden(1, args.c_dim, use_gpu=args.cuda)
     o, ep_ret, ep_len = env.reset(), 0, 0
     c, c_hidden = global_cpc.predict(o, c_hidden)
     trajectory = list()
@@ -260,19 +259,19 @@ def sac_opp(global_ac, global_ac_targ, global_cpc, rank, T, E, args, scores, win
             writer.add_scalar("metrics/win_rate", win_rate.item(), e)
             writer.add_scalar("metrics/round_step", ep_len, e)
             writer.add_scalar("metrics/alpha", alpha, e)
-            c_hidden = global_cpc.init_hidden(1, args.c_dim)
+            c_hidden = global_cpc.init_hidden(1, args.c_dim, use_gpu=args.cuda)
             o, ep_ret, ep_len = env.reset(), 0, 0
             trajectory = list()
             discard = False
 
             # CPC update handing
             if local_e > args.batch_size and local_e % args.update_every == 0:
-                data, indexes = replay_buffer.sample_traj(args.batch_size)
+                data, indexes, min_len = replay_buffer.sample_traj(args.batch_size)
                 global_cpc.train()
                 cpc_optimizer.zero_grad()
-                c_hidden = global_cpc.init_hidden(len(data), args.c_dim, use_gpu=True)
+                c_hidden = global_cpc.init_hidden(len(data), args.c_dim, use_gpu=args.cuda)
                 acc, loss, c_hidden, output = global_cpc(data, c_hidden)
-                replay_buffer.update_latent(indexes, output.detach())
+                replay_buffer.update_latent(indexes, min_len, output.detach())
                 loss.backward()
                 # add gradient clipping
                 nn.utils.clip_grad_norm(global_cpc.parameters(), 20)
