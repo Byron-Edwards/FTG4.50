@@ -1,17 +1,17 @@
 import argparse
 import json
 import os
+import gym
 import time
 import torch
 import torch.multiprocessing as mp
 from copy import deepcopy
 # from tensorboardX import GlobalSummaryWriter
-from OppModeling.atari_wrappers import make_ftg_ram,make_ftg_ram_nonstation
-from OppModeling.utils import Counter,count_vars
+from OppModeling.atari_wrappers import make_ftg_ram, make_ftg_ram_nonstation
+from OppModeling.utils import Counter, count_vars
 from OppModeling.SAC import MLPActorCritic
 from OppModeling.CPC import CPC
-from OppModeling.train_sac import sac,sac_opp
-from python.machete import Machete
+from OppModeling.train_sac import sac, sac_opp
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
@@ -28,13 +28,13 @@ if __name__ == '__main__':
     parser.add_argument('--station_rounds', type=int, default=1000)
     parser.add_argument('--list', nargs='+')
     # training setting
-    parser.add_argument('--replay_size', type=int, default=1000)
+    parser.add_argument('--replay_size', type=int, default=100000)
     parser.add_argument('--batch_size', type=int, default=256)
     parser.add_argument('--hid', type=int, default=256)
     parser.add_argument('--l', type=int, default=2, help="layers")
     parser.add_argument('--episode', type=int, default=100000)
-    parser.add_argument('--start_steps', type=int, default=1000)
-    parser.add_argument('--update_after', type=int, default=1000)
+    parser.add_argument('--start_steps', type=int, default=10000)
+    parser.add_argument('--update_after', type=int, default=10000)
     parser.add_argument('--update_every', type=int, default=1)
     parser.add_argument('--max_ep_len', type=int, default=1000)
     parser.add_argument('--min_alpha', type=float, default=0.3)
@@ -46,7 +46,7 @@ if __name__ == '__main__':
     parser.add_argument('--cpc', default=False, action="store_true")
     parser.add_argument('--z_dim', type=int, default=64)
     parser.add_argument('--c_dim', type=int, default=32)
-    parser.add_argument('--timestep', type=int, default=5)
+    parser.add_argument('--timestep', type=int, default=10)
     # Saving settings
     parser.add_argument('--save_freq', type=int, default=1000)
     parser.add_argument('--exp_name', type=str, default='test')
@@ -74,11 +74,12 @@ if __name__ == '__main__':
     device = torch.device("cuda") if args.cuda else torch.device("cpu")
     # env and model setup
     ac_kwargs = dict(hidden_sizes=[args.hid] * args.l)
-    # env = gym.make(args.env)
-    if not args.non_station:
-        env = make_ftg_ram(args.env, p2=args.p2)
+    if args.exp_name == "test":
+        env = gym.make("CartPole-v0")
+    elif args.non_station:
+        env = make_ftg_ram_nonstation(args.env, p2_list=args.list, total_episode=args.station_rounds,stable=args.stable)
     else:
-        env = make_ftg_ram_nonstation(args.env, p2_list=args.list, total_episode=args.station_rounds, stable=args.stable)
+        env = make_ftg_ram(args.env, p2=args.p2)
     obs_dim = env.observation_space.shape[0]
     act_dim = env.action_space.n
     if args.cpc:

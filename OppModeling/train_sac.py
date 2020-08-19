@@ -1,4 +1,5 @@
 import os
+import gym
 import numpy as np
 import torch
 import torch.nn as nn
@@ -18,11 +19,12 @@ def sac(global_ac, global_ac_targ, rank, T, E, args, scores, wins,buffer, device
     if not os.path.exists(tensorboard_dir):
         os.makedirs(tensorboard_dir)
     writer = SummaryWriter(log_dir=tensorboard_dir)
-    # env = gym.make(args.env)
-    if not args.non_station:
-        env = make_ftg_ram(args.env, p2=args.p2)
-    else:
+    if args.exp_name == "test":
+        env = gym.make("CartPole-v0")
+    elif args.non_station:
         env = make_ftg_ram_nonstation(args.env, p2_list=args.list, total_episode=args.station_rounds,stable=args.stable)
+    else:
+        env = make_ftg_ram(args.env, p2=args.p2)
     obs_dim = env.observation_space.shape[0]
     act_dim = env.action_space.n
     print("set up child process env")
@@ -174,11 +176,12 @@ def sac_opp(global_ac, global_ac_targ, global_cpc, rank, T, E, args, scores, win
     if not os.path.exists(tensorboard_dir):
         os.makedirs(tensorboard_dir)
     writer = SummaryWriter(log_dir=tensorboard_dir)
-    # env = gym.make(args.env)
-    if not args.non_station:
-        env = make_ftg_ram(args.env, p2=args.p2)
-    else:
+    if args.exp_name == "test":
+        env = gym.make("CartPole-v0")
+    elif args.non_station:
         env = make_ftg_ram_nonstation(args.env, p2_list=args.list, total_episode=args.station_rounds,stable=args.stable)
+    else:
+        env = make_ftg_ram(args.env, p2=args.p2)
     obs_dim = env.observation_space.shape[0]
     act_dim = env.action_space.n
     print("set up child process env")
@@ -204,7 +207,9 @@ def sac_opp(global_ac, global_ac_targ, global_cpc, rank, T, E, args, scores, win
     # Prepare for interaction with environment
     c_hidden = global_cpc.init_hidden(1, args.c_dim, use_gpu=args.cuda)
     o, ep_ret, ep_len = env.reset(), 0, 0
-    c, c_hidden = global_cpc.predict(o, c_hidden)
+    c1, c_hidden = global_cpc.predict(o, c_hidden)
+    assert len(c1.shape) == 3
+    c1 = c1.flatten().cpu().numpy()
     trajectory = list()
     discard = False
     local_t,local_e = 0,0
@@ -212,7 +217,7 @@ def sac_opp(global_ac, global_ac_targ, global_cpc, rank, T, E, args, scores, win
     e = E.value()
     while e <= args.episode:
         if t > args.start_steps:
-            a = local_ac.get_action(o + c.squeeze(), device=device)
+            a = local_ac.get_action(np.concatenate((o, c1), axis=0), device=device)
         else:
             a = env.action_space.sample()
 
@@ -227,12 +232,15 @@ def sac_opp(global_ac, global_ac_targ, global_cpc, rank, T, E, args, scores, win
         # horizon (that is, when it's an artificial terminal signal
         # that isn't based on the agent's state)
         d = False if (ep_len == args.max_ep_len) or discard else d
-        trajectory.append([o, a, r, o2, d, c])
+        c2, c_hidden = global_cpc.predict(o2, c_hidden)
+        assert len(c2.shape) == 3
+        c2 = c2.flatten().cpu().numpy()
+        trajectory.append([o, a, r, o2, d, c1, c2])
 
         # Super critical, easy to overlook step: make sure to update
         # most recent observation!
         o = o2
-        c, c_hidden = global_cpc.predict(o, c_hidden)
+        c1 = c2
 
         T.increment()
         local_t += 1
@@ -259,10 +267,6 @@ def sac_opp(global_ac, global_ac_targ, global_cpc, rank, T, E, args, scores, win
             writer.add_scalar("metrics/win_rate", win_rate.item(), e)
             writer.add_scalar("metrics/round_step", ep_len, e)
             writer.add_scalar("metrics/alpha", alpha, e)
-            c_hidden = global_cpc.init_hidden(1, args.c_dim, use_gpu=args.cuda)
-            o, ep_ret, ep_len = env.reset(), 0, 0
-            trajectory = list()
-            discard = False
 
             # CPC update handing
             if local_e > args.batch_size and local_e % args.update_every == 0:
@@ -270,15 +274,24 @@ def sac_opp(global_ac, global_ac_targ, global_cpc, rank, T, E, args, scores, win
                 global_cpc.train()
                 cpc_optimizer.zero_grad()
                 c_hidden = global_cpc.init_hidden(len(data), args.c_dim, use_gpu=args.cuda)
-                acc, loss, c_hidden, output = global_cpc(data, c_hidden)
-                replay_buffer.update_latent(indexes, min_len, output.detach())
+                acc, loss, latents = global_cpc(data, c_hidden)
+
+                replay_buffer.update_latent(indexes, min_len, latents.detach())
                 loss.backward()
                 # add gradient clipping
-                nn.utils.clip_grad_norm(global_cpc.parameters(), 20)
+                nn.utils.clip_grad_norm_(global_cpc.parameters(), 20)
                 cpc_optimizer.step()
 
+                writer.add_scalar("training/acc", acc, e)
+                writer.add_scalar("training/cpc_loss", loss.detach().item(), e)
+
+            c_hidden = global_cpc.init_hidden(1, args.c_dim, use_gpu=args.cuda)
+            o, ep_ret, ep_len = env.reset(), 0, 0
+            trajectory = list()
+            discard = False
+
         # SAC Update handling
-        if t >= args.update_after and t % args.update_every == 0:
+        if local_t >= args.update_after and local_t % args.update_every == 0:
             for j in range(args.update_every):
 
                 batch = replay_buffer.sample_trans(batch_size=args.batch_size,device=device)

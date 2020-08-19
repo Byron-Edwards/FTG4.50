@@ -5,6 +5,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
+import torch.nn.functional as F
 from timeit import default_timer as timer
 from OppModeling.utils import mlp
 
@@ -18,8 +19,8 @@ class CPC(nn.Module):
         self.encoder = mlp([obs_dim] + list(hidden_sizes) + [z_dim], nn.ReLU, nn.Identity)
         self.gru = nn.GRU(z_dim, c_dim, num_layers=1, bidirectional=False, batch_first=True)
         self.Wk = nn.ModuleList([nn.Linear(c_dim, z_dim) for i in range(timestep)])
-        self.softmax = nn.Softmax()
-        self.lsoftmax = nn.LogSoftmax()
+        self.softmax = F.softmax
+        self.lsoftmax = F.log_softmax
 
         def _weights_init(m):
             if isinstance(m, nn.Linear):
@@ -55,7 +56,7 @@ class CPC(nn.Module):
         obs_dim = x.size()[2]
         z = torch.empty((batch, seq_len, self.z_dim)).float()  # e.g. size 12*8*512
         for i in range(seq_len):
-            z[i] = self.encoder(x[:, i, :])
+            z[:, i, :] = self.encoder(x[:, i, :])
         return z, batch, seq_len, obs_dim
 
     def forward(self, x, c_hidden):
@@ -69,9 +70,13 @@ class CPC(nn.Module):
         nce = 0  # average over timestep and batch
         encode_samples = torch.empty((self.timestep, batch, self.z_dim)).float()  # e.g. size 12*8*512
         for i in np.arange(1, self.timestep + 1):
-            encode_samples[i - 1] = z[:, t_samples + i, :].view(batch, self.z_dim)  # z_tk e.g. size 8*512
+            encode_samples[i - 1] = z[:, (t_samples + i).long(), :].view(batch, self.z_dim)  # z_tk e.g. size 8*512
         forward_seq = z[:, :t_samples + 1, :]  # e.g. size 8*100*512
-        output, c_hidden = self.gru(forward_seq, c_hidden)  # output size e.g. 8*100*256
+
+        # calculate the full trace latent for the buffer update, so freeze the gradient in this step
+        with torch.no_grad():
+            latents, _ = self.gru(z, c_hidden)  # output size e.g. 8*100*256
+        output, _ = self.gru(forward_seq, c_hidden)  # output size e.g. 8*100*256
         c_t = output[:, t_samples, :].view(batch, self.c_dim)  # c_t e.g. size 8*256
         pred = torch.empty((self.timestep, batch, self.z_dim)).float()  # e.g. size 12*8*512
         for i in np.arange(0, self.timestep):
@@ -85,7 +90,7 @@ class CPC(nn.Module):
         nce /= -1. * batch * self.timestep
         accuracy = 1. * correct.item() / batch
 
-        return accuracy, nce, c_hidden, output # return output to update the latent value of the buffer
+        return accuracy, nce, latents # return output to update the latent value of the buffer
 
     @torch.no_grad()
     def predict(self, x, c_hidden):

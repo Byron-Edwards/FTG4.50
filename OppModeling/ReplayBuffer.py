@@ -1,4 +1,5 @@
 import torch
+import random
 import numpy as np
 from OppModeling.utils import combined_shape
 
@@ -95,15 +96,15 @@ class ReplayBufferOppo:
 
     def sample_trans(self, batch_size, device=None):
         indexes = np.arange(len(self.trajectories))
-        prob = self.traj_len
+        prob = np.array(self.traj_len) / sum(self.traj_len)
         sampled_trans = []
         sampled_traj_index = np.random.choice(indexes, size=batch_size, replace=True, p=prob)
         for index in sampled_traj_index:
-            sampled_trans.append(np.random.choice(self.trajectories[index]))
+            sampled_trans.append(random.choice(self.trajectories[index]))
         obs_buf, obs2_buf, act_buf, rew_buf, done_buf = [], [], [], [], []
         for trans in sampled_trans:
-            obs_buf.append(trans[0] + trans[-1])
-            obs2_buf.append(trans[3])
+            obs_buf.append(np.concatenate((trans[0], trans[-2]), axis=0))   # o1 + c1
+            obs2_buf.append(np.concatenate((trans[3], trans[-1]), axis=0))  # o2 + c2
             act_buf.append(trans[1])
             rew_buf.append(trans[2])
             done_buf.append(trans[4])
@@ -117,13 +118,17 @@ class ReplayBufferOppo:
         # cut off using the min length
         batch = []
         for i in indexes:
-            batch.append([self.trajectories[i][j][0] for j in range(min_len)])
+            # each sampled trace obs len = min_len + 1(the last o2 in this trace)
+            batch.append([self.trajectories[i][j][0] for j in range(min_len)] + [self.trajectories[i][min_len-1][3]])
         batch = np.array(batch, dtype=np.float)
-        assert batch.shape == (batch_size, min_len, self.obs_dim)
+        assert batch.shape == (batch_size, min_len + 1, self.obs_dim)
         return batch, indexes, min_len
 
     # currently can only update the trans index less than min
-    def update_latent(self, indexes, min_len, outputs):
+    def update_latent(self, indexes, min_len, latents):
         for i, index in enumerate(indexes):
             for j in range(min_len):
-                self.trajectories[index][j][-1] = outputs[i][j]
+                self.trajectories[index][j][-2] = latents[i][j].cpu().numpy() # update c1
+                self.trajectories[index][j][-1] = latents[i][j+1].cpu().numpy()   # update c2
+        print("updated latents")
+
