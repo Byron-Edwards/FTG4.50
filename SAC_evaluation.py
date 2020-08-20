@@ -8,18 +8,36 @@ import argparse
 from torch.utils.tensorboard import SummaryWriter
 from OppModeling.SAC import MLPActorCritic
 from OppModeling.CPC import CPC
-from OppModeling.atari_wrappers import make_ftg_ram_nonstation,make_ftg_ram
+from OppModeling.ReplayBuffer import ReplayBuffer
+from OppModeling.atari_wrappers import make_ftg_ram_nonstation, make_ftg_ram
+
+
+def ood_scores(prob):
+    assert prob.ndim == 2
+    data = torch.tensor(prob, dtype=torch.float32)
+    max_softmax, _ = torch.max(data, dim=1)
+    uncertainty = 1 - max_softmax
+    return uncertainty
+
+
+def get_ood_hist(replay_buffer, batch_size):
+    batch = replay_buffer.sample_batch(batch_size, device=device)
+    o, a, r, o2, d = batch['obs'], batch['act'], batch['rew'], batch['obs2'], batch['done']
+    with torch.no_grad():
+        a_prob, log_a_prob, sample_a, max_a, = global_ac.get_actions_info(global_ac.pi(o))
+    uncertainty = ood_scores(a_prob)
+    return uncertainty
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     # running setting
     parser.add_argument('--cuda', default=False, action='store_true')
     parser.add_argument('--seed', '-s', type=int, default=0)
-    parser.add_argument('--n_process', type=int, default=8)
     parser.add_argument('--episode', type=int, default=100)
     # basic env setting
     parser.add_argument('--env', type=str, default="FightingiceDataFrameskip-v0")
-    parser.add_argument('--p2', type=str, default="Toothless")
+    parser.add_argument('--p2', type=str, default="ReiwaThunder")
     # non station agent settings
     parser.add_argument('--non_station', default=False, action='store_true')
     parser.add_argument('--stable', default=False, action='store_true')
@@ -27,6 +45,9 @@ if __name__ == "__main__":
     parser.add_argument('--list', nargs='+')
     # training setting
     parser.add_argument('--hid', type=int, default=256)
+    parser.add_argument('--max_ep_len', type=int, default=1000)
+    parser.add_argument('--replay_size', type=int, default=100000)
+    parser.add_argument('--batch_size', type=int, default=256)
     parser.add_argument('--l', type=int, default=2, help="layers")
     # CPC setting
     parser.add_argument('--cpc', default=False, action="store_true")
@@ -47,8 +68,6 @@ if __name__ == "__main__":
     test_save_dir = os.path.join(experiment_dir, "evaluation")
     if not os.path.exists(test_save_dir):
         os.makedirs(test_save_dir)
-    with open(os.path.join(experiment_dir, "arguments"), 'w') as f:
-        args.__dict__ = json.load(f)
 
     ac_kwargs = dict(hidden_sizes=[args.hid] * args.l)
     device = torch.device("cuda") if args.cuda else torch.device("cpu")
@@ -63,29 +82,33 @@ if __name__ == "__main__":
     act_dim = env.action_space.n
 
     if args.cpc:
-        global_ac = MLPActorCritic(obs_dim+args.c_dim, act_dim, **ac_kwargs)
+        global_ac = MLPActorCritic(obs_dim + args.c_dim, act_dim, **ac_kwargs)
         global_cpc = CPC(timestep=args.timestep, obs_dim=obs_dim, hidden_sizes=[args.hid] * args.l, z_dim=args.z_dim,c_dim=args.c_dim)
     else:
         global_ac = MLPActorCritic(obs_dim, act_dim, **ac_kwargs)
         global_cpc = None
 
-    if os.path.exists(args.model_para):
-        global_ac.load_state_dict(torch.load(args.model_para))
+    if os.path.exists(os.path.join(args.save_dir, args.exp_name, args.model_para)):
+        global_ac.load_state_dict(torch.load(os.path.join(args.save_dir, args.exp_name, args.model_para)))
         print("load sac model")
 
     if os.path.exists(args.cpc_para) and args.cpc:
         global_cpc.load_state_dict(torch.load(args.cpc_para))
         print("load cpc model")
+
+    replay_buffer = ReplayBuffer(obs_dim=obs_dim, size=args.replay_size)
     writer = SummaryWriter(log_dir=test_save_dir)
-    c_hidden = global_cpc.init_hidden(1, args.c_dim, use_gpu=args.cuda)
     o, ep_ret, ep_len = env.reset(), 0, 0
-    c1, c_hidden = global_cpc.predict(o, c_hidden)
-    assert len(c1.shape) == 3
-    c1 = c1.flatten().cpu().numpy()
-    all_trace_data = []
+    if args.cpc:
+        c_hidden = global_cpc.init_hidden(1, args.c_dim, use_gpu=args.cuda)
+        c1, c_hidden = global_cpc.predict(o, c_hidden)
+        assert len(c1.shape) == 3
+        c1 = c1.flatten().cpu().numpy()
+        round_embedding = []
+        all_embeddings = []
     trajectory = list()
     discard = False
-    wins, scores, win_rate, m_score = [], [],0,0
+    wins, scores, win_rate, m_score = [], [], 0, 0
     local_t, local_e = 0, 0
     while local_e <= args.episode:
         with torch.no_grad():
@@ -99,16 +122,19 @@ if __name__ == "__main__":
         ep_len += 1
 
         d = False if (ep_len == args.max_ep_len) or discard else d
-        c2, c_hidden = global_cpc.predict(o2, c_hidden)
-        assert len(c2.shape) == 3
-        c2 = c2.flatten().cpu().numpy()
-        # changed the trace structure for further analysis
-        trajectory.append([o, a, r, o2, d, c1, c2, ep_len])
 
-        # Super critical, easy to overlook step: make sure to update
-        # most recent observation!
+        replay_buffer.store(o, a, r, o2, d)
+
+        if args.cpc:
+            # changed the trace structure for further analysis
+            c2, c_hidden = global_cpc.predict(o2, c_hidden)
+            assert len(c2.shape) == 3
+            c2 = c2.flatten().cpu().numpy()
+            trajectory.append([o, a, r, o2, d, c1, c2, ep_len])
+            round_embedding.append(c1)
+            c1 = c2
+
         o = o2
-        c1 = c2
         local_t += 1
 
         # End of trajectory handling
@@ -128,20 +154,28 @@ if __name__ == "__main__":
             writer.add_scalar("metrics/mean_score", m_score.item(), local_e)
             writer.add_scalar("metrics/win_rate", win_rate.item(), local_e)
             writer.add_scalar("metrics/round_step", ep_len, local_e)
-            c_hidden = global_cpc.init_hidden(1, args.c_dim, use_gpu=args.cuda)
+            if args.cpc:
+                round_embedding = np.array(round_embedding)
+                writer.add_embedding(mat=round_embedding, global_step=local_e, tag="round/embedding")
+                all_embeddings.append(round_embedding)
+                c_hidden = global_cpc.init_hidden(1, args.c_dim, use_gpu=args.cuda)
+                round_embedding = []
+                trajectory = list()
+
             o, ep_ret, ep_len = env.reset(), 0, 0
-            all_trace_data.append(trajectory)
-            trajectory = list()
             discard = False
 
     # Test end summary and saving
     print("=" * 20 + "TEST SUMMARY" + "=" * 20)
     summary = "opponent:\t{}\n# of episode:\t{}\n# of steps:\t{}\nmean score:\t{:.1f}\nwin_rate:\t{}\nsteps:\t{}".format(
-            args.p2, local_e, local_t, m_score, win_rate, ep_len)
+        args.p2, local_e, local_t, m_score, win_rate, ep_len)
     print(summary)
     print("=" * 20 + "TEST SUMMARY" + "=" * 20)
 
-    with open(os.path.join(test_save_dir, "test_summary.txt"),'w') as f:
+    # write data for the ood calculation
+    for i in range(100):
+        uncertainty = get_ood_hist(replay_buffer, args.batch_size)
+        writer.add_histogram(values=uncertainty, tag=experiment_dir, max_bins=100, global_step=i)
+
+    with open(os.path.join(test_save_dir, "test_summary.txt"), 'w') as f:
         f.write(summary)
-    with open(os.path.join(test_save_dir, "trace_data"),'wb') as f:
-        pickle.dump(all_trace_data, f)
