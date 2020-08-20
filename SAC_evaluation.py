@@ -37,7 +37,7 @@ if __name__ == "__main__":
     parser.add_argument('--episode', type=int, default=100)
     # basic env setting
     parser.add_argument('--env', type=str, default="FightingiceDataFrameskip-v0")
-    parser.add_argument('--p2', type=str, default="ReiwaThunder")
+    parser.add_argument('--p2', type=str, default="Toothless")
     # non station agent settings
     parser.add_argument('--non_station', default=False, action='store_true')
     parser.add_argument('--stable', default=False, action='store_true')
@@ -69,6 +69,8 @@ if __name__ == "__main__":
     if not os.path.exists(test_save_dir):
         os.makedirs(test_save_dir)
 
+    writer = SummaryWriter(log_dir=test_save_dir)
+
     ac_kwargs = dict(hidden_sizes=[args.hid] * args.l)
     device = torch.device("cuda") if args.cuda else torch.device("cpu")
 
@@ -97,7 +99,6 @@ if __name__ == "__main__":
         print("load cpc model")
 
     replay_buffer = ReplayBuffer(obs_dim=obs_dim, size=args.replay_size)
-    writer = SummaryWriter(log_dir=test_save_dir)
     o, ep_ret, ep_len = env.reset(), 0, 0
     if args.cpc:
         c_hidden = global_cpc.init_hidden(1, args.c_dim, use_gpu=args.cuda)
@@ -110,7 +111,7 @@ if __name__ == "__main__":
     discard = False
     wins, scores, win_rate, m_score = [], [], 0, 0
     local_t, local_e = 0, 0
-    while local_e <= args.episode:
+    while local_e < args.episode:
         with torch.no_grad():
             a = global_ac.get_action(o, greedy=True, device=device)
 
@@ -164,18 +165,19 @@ if __name__ == "__main__":
 
             o, ep_ret, ep_len = env.reset(), 0, 0
             discard = False
-
+    env.close()
+    del env
     # Test end summary and saving
     print("=" * 20 + "TEST SUMMARY" + "=" * 20)
-    summary = "opponent:\t{}\n# of episode:\t{}\n# of steps:\t{}\nmean score:\t{:.1f}\nwin_rate:\t{}\nsteps:\t{}".format(
-        args.p2, local_e, local_t, m_score, win_rate, ep_len)
+    summary = "opponent:\t{}\n# of episode:\t{}\n# of steps:\t{}\nmean score:\t{:.1f}\nwin_rate:\t{}\n".format(
+        args.p2, local_e, local_t, m_score, win_rate)
     print(summary)
     print("=" * 20 + "TEST SUMMARY" + "=" * 20)
 
     # write data for the ood calculation
     for i in range(100):
         uncertainty = get_ood_hist(replay_buffer, args.batch_size)
-        writer.add_histogram(values=uncertainty, tag=experiment_dir, max_bins=100, global_step=i)
+        writer.add_histogram(values=uncertainty, tag="opp/"+args.p2, max_bins=100, global_step=i)
 
     with open(os.path.join(test_save_dir, "test_summary.txt"), 'w') as f:
         f.write(summary)
