@@ -260,6 +260,7 @@ def main():
 
 if __name__ == '__main__':
     ############ Control Center and Hyperparameter ###############
+    # TODO add the unit test for CPC only, try on the mnist data set
     run_name = "cdc" + time.strftime("-%Y-%m-%d_%H_%M_%S")
     print(run_name)
     main()

@@ -84,9 +84,11 @@ if __name__ == '__main__':
     act_dim = env.action_space.n
     if args.cpc:
         global_ac = MLPActorCritic(obs_dim+args.c_dim, act_dim, **ac_kwargs)
+        global_cpc = CPC(timestep=args.timestep, obs_dim=obs_dim, hidden_sizes=[args.hid] * args.l, z_dim=args.z_dim,c_dim=args.c_dim)
+        global_cpc.share_memory()
     else:
         global_ac = MLPActorCritic(obs_dim, act_dim, **ac_kwargs)
-    global_cpc = CPC(timestep=args.timestep, obs_dim=obs_dim, hidden_sizes=[args.hid] * args.l, z_dim=args.z_dim, c_dim=args.c_dim)
+        global_cpc = None
 
     # async training setup
     T = Counter()
@@ -97,7 +99,10 @@ if __name__ == '__main__':
 
     if os.path.exists(os.path.join(args.save_dir, args.exp_name, args.model_para)):
         global_ac.load_state_dict(torch.load(os.path.join(args.save_dir, args.exp_name, args.model_para)))
-        print("load model")
+        print("load sac model")
+        if args.cpc:
+            global_cpc.load_state_dict(torch.load(os.path.join(args.save_dir, args.exp_name, args.cpc_para)))
+            print("load cpc model")
     if os.path.exists(os.path.join(args.save_dir, args.exp_name, args.train_indicator)):
         (e, t, scores_list, wins_list) = torch.load(os.path.join(args.save_dir, args.exp_name, args.train_indicator))
         T.set(t)
@@ -109,13 +114,13 @@ if __name__ == '__main__':
     global_ac_targ = deepcopy(global_ac)
     env.close()
     del env
-    global_ac.share_memory()
-    global_ac_targ.share_memory()
-    global_cpc.share_memory()
     if args.cuda:
         global_ac.to(device)
         global_ac_targ.to(device)
-        global_cpc.to(device)
+        if args.cpc:
+            global_cpc.to(device)
+    global_ac.share_memory()
+    global_ac_targ.share_memory()
     var_counts = tuple(count_vars(module) for module in [global_ac.pi, global_ac.q1, global_ac.q2])
     print('\nNumber of parameters: \t pi: %d, \t q1: %d, \t q2: %d\n' % var_counts)
 
