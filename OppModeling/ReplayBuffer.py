@@ -10,6 +10,8 @@ class ReplayBuffer:
     """
 
     def __init__(self, obs_dim, size):
+        self.obs_dim = obs_dim
+        self.size = size
         self.obs_buf = np.zeros(combined_shape(size, obs_dim), dtype=np.float32)
         self.obs2_buf = np.zeros(combined_shape(size, obs_dim), dtype=np.float32)
         self.act_buf = np.zeros(size, dtype=np.float32)
@@ -38,6 +40,9 @@ class ReplayBuffer:
                      rew=self.rew_buf[idxs],
                      done=self.done_buf[idxs])
         return {k: torch.as_tensor(v, dtype=torch.float32).to(device) for k, v in batch.items()}
+
+    def reset(self):
+        self.__init__(self.obs_dim,self.size)
 
 
 class ReplayBufferShare:

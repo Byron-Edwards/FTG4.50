@@ -1,8 +1,6 @@
 import gym
 import torch
-import json
 import os
-import pickle
 import numpy as np
 import argparse
 from torch.utils.tensorboard import SummaryWriter
@@ -34,7 +32,7 @@ if __name__ == "__main__":
     # running setting
     parser.add_argument('--cuda', default=False, action='store_true')
     parser.add_argument('--seed', '-s', type=int, default=0)
-    parser.add_argument('--episode', type=int, default=100)
+    parser.add_argument('--episode', type=int, default=10)
     # basic env setting
     parser.add_argument('--env', type=str, default="FightingiceDataFrameskip-v0")
     parser.add_argument('--p2', type=str, default="Toothless")
@@ -55,11 +53,11 @@ if __name__ == "__main__":
     parser.add_argument('--c_dim', type=int, default=32)
     parser.add_argument('--timestep', type=int, default=10)
     # Saving settings
-    parser.add_argument('--exp_name', type=str, default='test')
+    parser.add_argument('--exp_name', type=str, default='ReiwaThunder')
     parser.add_argument('--save-dir', type=str, default="./experiments")
     parser.add_argument('--traj_dir', type=str, default="./experiments")
-    parser.add_argument('--model_para', type=str, default="test_sac.torch")
-    parser.add_argument('--cpc_para', type=str, default="test_cpc.torch")
+    parser.add_argument('--model_para', type=str, default="ReiwaThunder_1.torch")
+    parser.add_argument('--cpc_para', type=str, default="ReiwaThunder.torch")
     args = parser.parse_args()
 
     experiment_dir = os.path.join(args.save_dir, args.exp_name)
@@ -69,7 +67,11 @@ if __name__ == "__main__":
     if not os.path.exists(test_save_dir):
         os.makedirs(test_save_dir)
 
-    writer = SummaryWriter(log_dir=test_save_dir)
+    tensorboard_dir = os.path.join(test_save_dir, args.p2)
+    if not os.path.exists(test_save_dir):
+        os.makedirs(test_save_dir)
+
+    writer = SummaryWriter(log_dir=tensorboard_dir)
 
     ac_kwargs = dict(hidden_sizes=[args.hid] * args.l)
     device = torch.device("cuda") if args.cuda else torch.device("cpu")
@@ -107,7 +109,9 @@ if __name__ == "__main__":
         c1 = c1.flatten().cpu().numpy()
         round_embedding = []
         all_embeddings = []
+        meta = []
     trajectory = list()
+    p2 = env.p2
     discard = False
     wins, scores, win_rate, m_score = [], [], 0, 0
     local_t, local_e = 0, 0
@@ -133,6 +137,8 @@ if __name__ == "__main__":
             c2 = c2.flatten().cpu().numpy()
             trajectory.append([o, a, r, o2, d, c1, c2, ep_len])
             round_embedding.append(c1)
+            all_embeddings.append(c1)
+            meta.append([env.p2,local_e, ep_len,r, a])
             c1 = c2
 
         o = o2
@@ -150,34 +156,44 @@ if __name__ == "__main__":
             win_rate = np.mean(wins[-100:])
             print(
                 "opponent:{}, # of episode :{},  # of steps :{}, round score: {}, mean score : {:.1f}, win_rate:{}, steps: {}".format(
-                    args.p2, local_e, local_t, ep_ret, m_score, win_rate, ep_len))
+                    p2, local_e, local_t, ep_ret, m_score, win_rate, ep_len))
             writer.add_scalar("metrics/round_score", ep_ret, local_e)
             writer.add_scalar("metrics/mean_score", m_score.item(), local_e)
             writer.add_scalar("metrics/win_rate", win_rate.item(), local_e)
             writer.add_scalar("metrics/round_step", ep_len, local_e)
+
+            # write data for the ood calculation
+            uncertainty = get_ood_hist(replay_buffer, args.batch_size)
+            writer.add_histogram(values=uncertainty, max_bins=100, global_step=local_e, tag="opp")
             if args.cpc:
                 round_embedding = np.array(round_embedding)
-                writer.add_embedding(mat=round_embedding, global_step=local_e, tag="round/embedding")
-                all_embeddings.append(round_embedding)
+                writer.add_embedding(mat=all_embeddings, metadata=meta,metadata_header=["opponent", "round", "step", "reward", "action"])
                 c_hidden = global_cpc.init_hidden(1, args.c_dim, use_gpu=args.cuda)
                 round_embedding = []
                 trajectory = list()
 
             o, ep_ret, ep_len = env.reset(), 0, 0
             discard = False
+
+            # if p2 changed, save the summary and reset the indicators
+            if env.p2 != p2:
+                print("=" * 20 + "TEST SUMMARY" + "=" * 20)
+                summary = "opponent:\t{}\n# of episode:\t{}\n# of steps:\t{}\nmean score:\t{:.1f}\nwin_rate:\t{}\n".format(
+                    p2, local_e, local_t, m_score, win_rate)
+                print(summary)
+                print("=" * 20 + "TEST SUMMARY" + "=" * 20)
+                with open(os.path.join(test_save_dir, p2 + "_summary.txt"), 'w') as f:
+                    f.write(summary)
+
+                replay_buffer.reset()
+                wins, scores, win_rate, m_score = [], [], 0, 0
+                local_t, local_e = 0, 0
+            p2 = env.p2
+
+    # Test end summary and saving
     env.close()
     del env
-    # Test end summary and saving
-    print("=" * 20 + "TEST SUMMARY" + "=" * 20)
-    summary = "opponent:\t{}\n# of episode:\t{}\n# of steps:\t{}\nmean score:\t{:.1f}\nwin_rate:\t{}\n".format(
-        args.p2, local_e, local_t, m_score, win_rate)
-    print(summary)
-    print("=" * 20 + "TEST SUMMARY" + "=" * 20)
 
-    # write data for the ood calculation
-    for i in range(100):
-        uncertainty = get_ood_hist(replay_buffer, args.batch_size)
-        writer.add_histogram(values=uncertainty, tag="opp/"+args.p2, max_bins=100, global_step=i)
 
-    with open(os.path.join(test_save_dir, "test_summary.txt"), 'w') as f:
-        f.write(summary)
+
+
