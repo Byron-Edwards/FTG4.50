@@ -1,7 +1,6 @@
 import torch
 import torch.nn as nn
 import numpy as np
-import os
 
 
 class GaussianLayer(nn.Module):
@@ -55,29 +54,8 @@ class GaussianLayer(nn.Module):
 #         return ce+(self.lambd/x.size(0))*likelihood.sum()
 
 
-def retrieve_scores(model, loader, device, k, saved_in_scores, saved_out_scores, out=False):
-    # saved_out_scores = './OOD_scores/{}_out_scores_{}_preds.pt'.format(
-    #     model_type, data_type)
-    # saved_in_scores = './OOD_scores/{}_in_scores_{}_preds.pt'.format(
-    #     model_type, data_type)
-    if out:
-        if os.path.exists(saved_out_scores):
-            preds = torch.load(saved_out_scores)
-        else:
-            preds = predict(model, loader, device)
-        # preds = predict(model, loader, device)
-    else:
-        if os.path.exists(saved_in_scores):
-            preds = torch.load(saved_in_scores)
-        else:
-            preds = predict(model, loader, device)
-        # preds = predict(model, loader, device)
-    if out and not os.path.exists(saved_out_scores):
-        torch.save(preds, saved_out_scores)
-        print('Save to: '+saved_out_scores)
-    elif not out and not os.path.exists(saved_in_scores):
-        torch.save(preds, saved_in_scores)
-        print('Save to: '+saved_in_scores)
+def retrieve_scores(model, loader, device, k):
+    preds = predict(model, loader, device)
     top_k = preds.topk(k).values.squeeze()
     avg_ll = np.mean(top_k[:, 1:k].cpu().detach().numpy())
     llr = top_k[:, 0].cpu()-avg_ll
@@ -135,8 +113,7 @@ def predict(model, loader, device):
     with torch.no_grad():
         # for batch_idx, (inputs, _) in enumerate(loader):
         # for inputs,_ in tqdm(loader):
-        inputs = loader
-        inputs = torch.tensor(inputs,device=device)
+        inputs = torch.tensor(loader,device=device)
         outputs = model(inputs)
         predictions.append(outputs)
     predictions = torch.cat(predictions).to(device)
