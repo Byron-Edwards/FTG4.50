@@ -5,31 +5,31 @@ import numpy as np
 import matplotlib.pyplot as plt
 import argparse
 import  torch.nn.functional as F
+from collections import defaultdict
 from torch.utils.tensorboard import SummaryWriter
 from OppModeling.SAC import MLPActorCritic
 from OppModeling.CPC import CPC
 from OppModeling.ReplayBuffer import ReplayBuffer
+from OppModeling.utils import colors,load_my_state_dict
 from OppModeling.atari_wrappers import make_ftg_ram_nonstation, make_ftg_ram
-from OOD.glod import ConvertToGlod, calc_gaussian_params,retrieve_scores
+from OOD.glod import ConvertToGlod, calc_gaussian_params, retrieve_scores
 
 
-def glod_evaluation(model, hidden_dim, act_dim, train_loader, out_loader, in_loader, k, saved_in_scores, saved_out_scores):
+def convert_to_glod(model, hidden_dim, act_dim, train_loader,device):
     print('Begin converting')
     model = ConvertToGlod(model, num_classes=act_dim, input_dim=hidden_dim)
     covs, centers = calc_gaussian_params(model, train_loader, device, act_dim)
     print('Done Calculation')
     model.gaussian_layer.covs.data = covs
     model.gaussian_layer.centers.data = centers
-    out_scores = retrieve_scores(model, out_loader, device, k, saved_in_scores, saved_out_scores, out=True)
-    in_scores = retrieve_scores(model, in_loader, device, k, saved_in_scores, saved_out_scores, out=False)
-    return in_scores, out_scores
+    return model
 
 
 def ood_scores(prob):
     assert prob.ndim == 2
     data = prob
     max_softmax, _ = torch.max(data, dim=1)
-    uncertainty = 1 - max_softmax
+    uncertainty = torch.tensor(1) - max_softmax
     return uncertainty
 
 
@@ -68,10 +68,10 @@ if __name__ == "__main__":
     parser.add_argument('--c_dim', type=int, default=32)
     parser.add_argument('--timestep', type=int, default=10)
     # Saving settings
-    parser.add_argument('--exp_name', type=str, default='ReiwaThunder')
+    parser.add_argument('--exp_name', type=str, default='Toothless')
     parser.add_argument('--save-dir', type=str, default="./experiments")
     parser.add_argument('--traj_dir', type=str, default="./experiments")
-    parser.add_argument('--model_para', type=str, default="ReiwaThunder_1.torch")
+    parser.add_argument('--model_para', type=str, default="Toothless.torch")
     parser.add_argument('--cpc_para', type=str, default="test_cpc.torch")
     args = parser.parse_args()
 
@@ -79,13 +79,22 @@ if __name__ == "__main__":
     experiment_dir = os.path.join(args.save_dir, args.exp_name)
     if not os.path.exists(experiment_dir):
         os.makedirs(experiment_dir)
+        print("Create Folder {}".format(experiment_dir))
+    else:
+        print("Folder Exist {}".format(experiment_dir))
     test_save_dir = os.path.join(experiment_dir, "evaluation")
     if not os.path.exists(test_save_dir):
         os.makedirs(test_save_dir)
+        print("Create Folder {}".format(test_save_dir))
+    else:
+        print("Folder Exist {}".format(test_save_dir))
 
     tensorboard_dir = os.path.join(test_save_dir, args.p2)
-    if not os.path.exists(test_save_dir):
-        os.makedirs(test_save_dir)
+    if not os.path.exists(tensorboard_dir):
+        os.makedirs(tensorboard_dir)
+        print("Create Folder {}".format(tensorboard_dir))
+    else:
+        print("Folder Exist {}".format(tensorboard_dir))
 
     writer = SummaryWriter(log_dir=tensorboard_dir)
 
@@ -113,7 +122,8 @@ if __name__ == "__main__":
         replay_buffer = ReplayBuffer(obs_dim=obs_dim, size=args.replay_size)
 
     if os.path.exists(os.path.join(args.save_dir, args.exp_name, args.model_para)):
-        global_ac.load_state_dict(torch.load(os.path.join(args.save_dir, args.exp_name, args.model_para)))
+        # global_ac.load_state_dict(torch.load(os.path.join(args.save_dir, args.exp_name, args.model_para)))
+        load_my_state_dict(global_ac,os.path.join(args.save_dir, args.exp_name, args.model_para))
         print("load sac model")
 
     if os.path.exists(os.path.join(args.save_dir, args.exp_name, args.cpc_para)) and args.cpc:
@@ -134,7 +144,9 @@ if __name__ == "__main__":
     p2 = env.p2
     p2_list = [str(p2)]
     discard = False
-    glod_data = []
+    uncertainties = []
+    glod_input = defaultdict(list)
+    glod_target = defaultdict(list)
     wins, scores, win_rate, m_score = [], [], 0, 0
     local_t, local_e = 0, 0
     total_t, total_e = 0, 0
@@ -158,7 +170,7 @@ if __name__ == "__main__":
         ep_len += 1
 
         d = False if (ep_len == args.max_ep_len) or discard else d
-        glod_data.append(((o, a), str(p2)))
+        glod_input[p2].append(o),glod_target[p2].append(a)
 
         if args.cpc:
             # changed the trace structure for further analysis
@@ -197,9 +209,6 @@ if __name__ == "__main__":
             writer.add_scalar("metrics/win_rate", win_rate.item(), total_e)
             writer.add_scalar("metrics/round_step", ep_len, total_e)
 
-            # write data for the ood calculation
-            uncertainty = get_ood_hist(replay_buffer, args.batch_size)
-            writer.add_histogram(values=uncertainty, max_bins=100, global_step=total_e, tag="opp")
             if args.cpc:
                 round_embedding = np.array(round_embedding)
                 c_hidden = global_cpc.init_hidden(1, args.c_dim, use_gpu=args.cuda)
@@ -218,10 +227,17 @@ if __name__ == "__main__":
                 print("=" * 20 + "TEST SUMMARY" + "=" * 20 + "\n")
                 with open(os.path.join(test_save_dir, p2 + "_summary.txt"), 'w') as f:
                     f.write(summary)
+
+                # write data for the ood calculation
+                uncertainty = get_ood_hist(replay_buffer, 2048)
+                uncertainties.append(uncertainty.detach().cpu().numpy())
+                writer.add_histogram(values=uncertainty, max_bins=100, global_step=total_e, tag="opp")
+                torch.save(replay_buffer, os.path.join(test_save_dir, "replay_buffer_{}".format(p2)))
                 replay_buffer.reset()
                 wins, scores, win_rate, m_score = [], [], 0, 0
                 local_t, local_e = 0, 0
-                p2_list.append(str(env.p2))
+                if total_e < args.episode:
+                    p2_list.append(str(env.p2))
                 p2 = env.p2
 
     # Test end summary and saving
@@ -239,30 +255,35 @@ if __name__ == "__main__":
         writer.add_embedding(mat=all_embeddings, metadata=meta,
                              metadata_header=["opponent", "round", "step", "reward", "action", "uncertainty"])
 
+    in_p2 = "ReiwaThunder"
+    # Draw the MaxSoftmax OOD plot
+    torch.save((in_p2, p2_list), os.path.join(test_save_dir, "OPP_INFO"))
+    torch.save(uncertainties, os.path.join(test_save_dir, "SOFTMAX_SCORE"))
+    plt.hist(uncertainties, bins=300, histtype='step', color=colors[:len(uncertainties)], label=p2_list, alpha= 0.5, rwidth=0.8)
+    plt.legend(prop={'size': 10})
+    plt.title(in_p2 + " softmax")
+    plt.ylabel("counts")
+    plt.xlabel("1 - MaxSoftmax")
+    plt.savefig(os.path.join(test_save_dir, '{}.pdf'.format("Softmax")))
+    plt.show()
+    plt.clf()
 
-    for p2 in p2_list:
-        train_input, train_target, glod_in, glod_out = [], [], [],[]
-        for (data, data_p2) in glod_data:
-            if data_p2 == p2:
-                train_input.append(data[0])
-                train_target.append(data[1])
-                glod_in.append(data[0])
-            else:
-                glod_out.append(data[0])
-        # train_input = torch.tensor(train_input)
-        # train_target = F.one_hot(torch.tensor(train_target), num_classes=act_dim)
-        glod_train = (train_input, train_target)
-        in_scores, out_scores = glod_evaluation(model=global_ac.pi, hidden_dim=args.hid, act_dim=act_dim,
-                                                train_loader=glod_train, out_loader=glod_out, in_loader=glod_in,
-                                                k=act_dim, saved_in_scores=os.path.join(test_save_dir, "in_scores"),
-                                                saved_out_scores=os.path.join(test_save_dir, "in_scores"))
+    # Draw the GLOD plot
+    torch.save((glod_input, glod_target), os.path.join(test_save_dir, "GLOD_SCORES"))
+    train_input = glod_input[in_p2]
+    train_target = glod_target[in_p2]
+    glod_train = (train_input, train_target)
+    model = convert_to_glod(model=global_ac.pi, hidden_dim=args.hid, act_dim=act_dim, train_loader=glod_train,device=device)
+    scores = [retrieve_scores(model, glod_input[name], device, 20).detach().cpu().numpy() for name in p2_list]
 
-        # n, bins, patches = plt.hist(in_scores, 50, density=True, facecolor='g', alpha=0.75)
-        # n_bins = 100
-        # fig, axes = plt.subplots(nrows=len(p2_list), ncols=1)
-        # ax0, ax1, ax2, ax3 = axes.flatten()
-        # colors = ['red', 'tan', 'lime']
-        # ax0.hist(in_scores, n_bins, density=False, histtype='bar', color=colors, label=colors)
+    plt.hist(scores, bins=300,  histtype='step', color=colors[:len(scores)], label=p2_list, alpha= 0.5, rwidth=0.8)
+    plt.legend(prop={'size': 10})
+    plt.title(in_p2 + " GLOD")
+    plt.ylabel("counts")
+    plt.xlabel("GLOD SCORE")
+    plt.savefig(os.path.join(test_save_dir, '{}.pdf'.format("GLOD")))
+    plt.show()
+    print("HERE")
 
     env.close()
     del env

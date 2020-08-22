@@ -434,7 +434,7 @@ class FTGNonstationWrapper(gym.Wrapper):
         print("Mode:{}, Shuffled p2 list: {} \n p2_counters:{}".format("stable" if stable else "random", self.shuffled_p2, self.random_list))
 
     def reset(self):
-        if self.current_episode >= np.sum(self.random_list):
+        if self.current_episode > np.sum(self.random_list):
             self.current_episode = 1
             self.create_order(self.stable)
         for index, p2 in enumerate(self.shuffled_p2):
