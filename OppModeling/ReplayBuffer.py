@@ -44,6 +44,28 @@ class ReplayBuffer:
     def reset(self):
         self.__init__(self.obs_dim,self.size)
 
+    def ood_drop(self, reserved_indexes):
+        print("before ood drop: {}".format(self.size))
+        reserved_len = len(reserved_indexes)
+        self.obs_buf[:reserved_len] = self.obs_buf[reserved_indexes]
+        self.obs_buf[reserved_len:] = 0
+        self.obs2_buf[:reserved_len] = self.obs2_buf[reserved_indexes]
+        self.obs2_buf[reserved_len:] = 0
+        self.act_buf[:reserved_len] = self.act_buf[reserved_indexes]
+        self.act_buf[reserved_len:] = 0
+        self.rew_buf[:reserved_len] = self.rew_buf[reserved_indexes]
+        self.rew_buf[reserved_len:] = 0
+        self.done_buf[:reserved_len] = self.done_buf[reserved_indexes]
+        self.done_buf[reserved_len:] = 0
+        self.size = min(reserved_len, self.max_size)
+        self.ptr = self.size
+        print("after ood drop: {}".format(self.size))
+
+    def is_full(self):
+        return self.size == self.max_size
+
+
+
 
 class ReplayBufferShare:
     """

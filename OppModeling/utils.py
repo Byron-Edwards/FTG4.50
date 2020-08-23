@@ -1,4 +1,5 @@
 import numpy as np
+import logging
 import torch
 import torch.multiprocessing as mp
 import torch.nn as nn
@@ -21,6 +22,8 @@ def load_my_state_dict(model, saved_state):
     # 1. filter out unnecessary keys and check the missed keys
     pretrained_dict = {k: v for k, v in pretrained_dict.items() if k in model_dict}
     missed_dict = {k: v for k, v in model_dict.items() if k not in pretrained_dict}
+    if len(missed_dict.keys()) >= 3:
+        logging.warning("The Missed diction keys is larger than {}, Please check if the pretrain state and the code".format(len(missed_dict.keys())))
     new_dict = {**pretrained_dict, **missed_dict}
     print("Pretrained_dict Keys: {}".format(pretrained_dict.keys()))
     print("Missed dict Keys: {}, Will use the initial one".format(missed_dict.keys()))

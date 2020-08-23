@@ -9,6 +9,8 @@ from OppModeling.SAC import MLPActorCritic
 from OppModeling.ReplayBuffer import ReplayBuffer, ReplayBufferOppo, ReplayBufferShare
 from OppModeling.atari_wrappers import make_ftg_ram,make_ftg_ram_nonstation
 from OppModeling.model_parameter_trans import state_dict_trans
+from OOD.glod import convert_to_glod, retrieve_scores
+
 
 
 def sac(global_ac, global_ac_targ, rank, T, E, args, scores, wins,buffer, device=None, tensorboard_dir=None,):
@@ -61,6 +63,9 @@ def sac(global_ac, global_ac_targ, rank, T, E, args, scores, wins,buffer, device
     discard = False
     t = T.value()
     e = E.value()
+    local_t, local_e = 0, 0
+    glod_input = list()
+    glod_target = list()
     # Main loop: collect experience in env and update/log each epoch
     while e <= args.episode:
 
@@ -83,7 +88,7 @@ def sac(global_ac, global_ac_targ, rank, T, E, args, scores, wins,buffer, device
         # horizon (that is, when it's an artificial terminal signal
         # that isn't based on the agent's state)
         d = False if (ep_len == args.max_ep_len) or discard else d
-
+        glod_input.append(o), glod_target.append(a)
         # Store experience to replay buffer
         replay_buffer.store(o, a, r, o2, d)
 
@@ -93,11 +98,13 @@ def sac(global_ac, global_ac_targ, rank, T, E, args, scores, wins,buffer, device
 
         T.increment()
         t = T.value()
+        local_t += 1
 
         # End of trajectory handling
         if d or (ep_len == args.max_ep_len) or discard:
             E.increment()
             e = E.value()
+            local_e += 1
             # logger.store(EpRet=ep_ret, EpLen=ep_len)
             if info.get('win', False):
                 wins.append(1)
@@ -118,8 +125,29 @@ def sac(global_ac, global_ac_targ, rank, T, E, args, scores, wins,buffer, device
             trajectory = list()
             discard = False
 
+        # OOD update stage
+        if (local_t >= args.ood_update_step and local_t % args.ood_update_step == 0 or replay_buffer.is_full()) and args.ood:
+            # used all the data collected from the last args.ood_update_steps as the train data
+            print("Conduct OOD updating")
+            ood_train = (glod_input, glod_target)
+            glod_model = convert_to_glod(global_ac.pi,train_loader=ood_train, hidden_dim=args.hid, act_dim=act_dim, device=device)
+            glod_scores = retrieve_scores(glod_model, replay_buffer.obs_buf[:replay_buffer.size], device=device, k=args.ood_K)
+            glod_scores = glod_scores.detach().cpu().numpy()
+            print(len(glod_scores))
+            writer.add_histogram(values=glod_scores, max_bins=300, global_step=local_t, tag="OOD")
+            drop_points = np.percentile(a=glod_scores, q=[args.ood_drop_lower, args.ood_drop_upper])
+            lower, upper = drop_points[0], drop_points[1]
+            print(lower,upper)
+            mask = np.logical_and((glod_scores >= lower), (glod_scores <= upper))
+            reserved_indexes = np.argwhere(mask).flatten()
+            print(len(reserved_indexes))
+            if len(reserved_indexes) > 0:
+                replay_buffer.ood_drop(reserved_indexes)
+                glod_input = list()
+                glod_target = list()
+
         # Update handling
-        if t >= args.update_after and t % args.update_every == 0:
+        if local_t >= args.update_after and local_t % args.update_every == 0:
             for j in range(args.update_every):
 
                 batch = replay_buffer.sample_batch(args.batch_size,device=device)
@@ -212,7 +240,7 @@ def sac_opp(global_ac, global_ac_targ, global_cpc, rank, T, E, args, scores, win
     c1 = c1.flatten().cpu().numpy()
     trajectory = list()
     discard = False
-    local_t,local_e = 0,0
+    local_t, local_e = 0,0
     t = T.value()
     e = E.value()
     while e <= args.episode:

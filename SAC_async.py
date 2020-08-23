@@ -33,8 +33,8 @@ if __name__ == '__main__':
     parser.add_argument('--hid', type=int, default=256)
     parser.add_argument('--l', type=int, default=2, help="layers")
     parser.add_argument('--episode', type=int, default=100000)
-    parser.add_argument('--start_steps', type=int, default=10000)
-    parser.add_argument('--update_after', type=int, default=10000)
+    parser.add_argument('--start_steps', type=int, default=1000)
+    parser.add_argument('--update_after', type=int, default=1000)
     parser.add_argument('--update_every', type=int, default=1)
     parser.add_argument('--max_ep_len', type=int, default=1000)
     parser.add_argument('--min_alpha', type=float, default=0.3)
@@ -47,6 +47,12 @@ if __name__ == '__main__':
     parser.add_argument('--z_dim', type=int, default=64)
     parser.add_argument('--c_dim', type=int, default=32)
     parser.add_argument('--timestep', type=int, default=10)
+    # OOD setting
+    parser.add_argument('--ood', default=False, action="store_true")
+    parser.add_argument('--ood_K', type=int, default=15)
+    parser.add_argument('--ood_update_step', type=int, default=2000)
+    parser.add_argument('--ood_drop_lower',type=int, default=10)
+    parser.add_argument('--ood_drop_upper', type=int, default=90)
     # Saving settings
     parser.add_argument('--save_freq', type=int, default=1000)
     parser.add_argument('--exp_name', type=str, default='test')

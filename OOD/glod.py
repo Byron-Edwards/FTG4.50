@@ -88,7 +88,7 @@ def calc_gaussian_params(model, loader, device, n_classes):
     with torch.no_grad():
         # for (inputs, targets) in tqdm(loader):
         (inputs, targets) = loader
-        inputs, targets = torch.tensor(inputs, device=device), torch.tensor(targets, device=device)
+        inputs, targets = torch.tensor(inputs, device=device, dtype=torch.float), torch.tensor(targets, device=device,dtype=torch.float)
         outputs = model.penultimate_forward(inputs)
         # print(outputs.size())
         outputs_list.append(outputs)
@@ -118,3 +118,22 @@ def predict(model, loader, device):
         predictions.append(outputs)
     predictions = torch.cat(predictions).to(device)
     return predictions
+
+
+def convert_to_glod(model, hidden_dim, act_dim, train_loader,device):
+    print('Begin converting')
+    model = ConvertToGlod(model, num_classes=act_dim, input_dim=hidden_dim)
+    covs, centers = calc_gaussian_params(model, train_loader, device, act_dim)
+    print('Done Calculation')
+    model.gaussian_layer.covs.data = covs
+    model.gaussian_layer.centers.data = centers
+    return model
+
+
+def ood_scores(prob):
+    assert prob.ndim == 2
+    data = prob
+    max_softmax, _ = torch.max(data, dim=1)
+    uncertainty = torch.tensor(1) - max_softmax
+    return uncertainty
+

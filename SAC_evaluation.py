@@ -4,7 +4,6 @@ import os
 import numpy as np
 import matplotlib.pyplot as plt
 import argparse
-import  torch.nn.functional as F
 from collections import defaultdict
 from torch.utils.tensorboard import SummaryWriter
 from OppModeling.SAC import MLPActorCritic
@@ -12,25 +11,7 @@ from OppModeling.CPC import CPC
 from OppModeling.ReplayBuffer import ReplayBuffer
 from OppModeling.utils import colors,load_my_state_dict
 from OppModeling.atari_wrappers import make_ftg_ram_nonstation, make_ftg_ram
-from OOD.glod import ConvertToGlod, calc_gaussian_params, retrieve_scores
-
-
-def convert_to_glod(model, hidden_dim, act_dim, train_loader,device):
-    print('Begin converting')
-    model = ConvertToGlod(model, num_classes=act_dim, input_dim=hidden_dim)
-    covs, centers = calc_gaussian_params(model, train_loader, device, act_dim)
-    print('Done Calculation')
-    model.gaussian_layer.covs.data = covs
-    model.gaussian_layer.centers.data = centers
-    return model
-
-
-def ood_scores(prob):
-    assert prob.ndim == 2
-    data = prob
-    max_softmax, _ = torch.max(data, dim=1)
-    uncertainty = torch.tensor(1) - max_softmax
-    return uncertainty
+from OOD.glod import convert_to_glod, retrieve_scores,ood_scores
 
 
 def get_ood_hist(replay_buffer, batch_size):
