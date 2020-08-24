@@ -37,12 +37,12 @@ if __name__ == '__main__':
     parser.add_argument('--list', nargs='+')
     # training setting
     parser.add_argument('--replay_size', type=int, default=100000)
-    parser.add_argument('--batch_size', type=int, default=256)
+    parser.add_argument('--batch_size', type=int, default=4096)
     parser.add_argument('--hid', type=int, default=256)
     parser.add_argument('--l', type=int, default=2, help="layers")
     parser.add_argument('--episode', type=int, default=100000)
     parser.add_argument('--update_after', type=int, default=100)
-    parser.add_argument('--update_every', type=int, default=3)
+    parser.add_argument('--update_every', type=int, default=1)
     parser.add_argument('--max_ep_len', type=int, default=1000)
     parser.add_argument('--min_alpha', type=float, default=0.3)
     parser.add_argument('--fix_alpha', default=False, action="store_true")
@@ -198,12 +198,8 @@ if __name__ == '__main__':
         t = T.value()
         e = E.value()
 
-        # Even testing do not stop the training for OOD
-        if e == last_updated:
-            continue
-        last_updated = e
         # OOD update stage
-        if e >= args.ood_starts and e % args.ood_update_rounds == 0 and args.ood:
+        if e >= args.ood_starts and e % args.ood_update_rounds == 0 and args.ood and e != last_updated:
             print(" OOD updating at rounds {}".format(e))
             print("Replay Buffer Size: {}, Training Buffer Size: {}".format(replay_buffer.size, training_buffer.size))
             glod_idxs = np.random.randint(0, training_buffer.size, size=int(training_buffer.size * args.ood_train_per))
@@ -227,19 +223,20 @@ if __name__ == '__main__':
             print("Replay Buffer Size: {}, Training Buffer Size: {}".format(replay_buffer.size, training_buffer.size))
             torch.save((glod_scores, replay_buffer.p2_buf[:replay_buffer.size]),
                        os.path.join(args.save_dir, args.exp_name, "glod_info_{}".format(e)))
+            last_updated = e
 
-        if sum(TESTING) > 0:
-            print("In the TESTING stage, pause the training processes...")
-            time.sleep(3)
-            continue
-
-        # enter the testing phase and pause the training
-        if e > 0 and e % args.test_every == 0 and tested_e != e:
-            print("TEST START")
-            for i in range(4):
-                TESTING[i] = 1
-            tested_e = e
-            continue
+        # if sum(TESTING) > 0:
+        #     print("In the TESTING stage, pause the training processes...")
+        #     time.sleep(3)
+        #     continue
+        #
+        # # enter the testing phase and pause the training
+        # if e > 0 and e % args.test_every == 0 and tested_e != e:
+        #     print("TEST START")
+        #     for i in range(4):
+        #         TESTING[i] = 1
+        #     tested_e = e
+        #     continue
 
         # SAC Update handling
         if e >= args.update_after and t % args.update_every == 0:
