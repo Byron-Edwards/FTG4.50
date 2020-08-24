@@ -52,45 +52,33 @@ def test_summary(p2, steps, m_score, win_rate, writer, args, e):
     writer.add_scalar("Test/total_step", steps, e)
 
 
-def test_func(global_ac, rank, E, args, device, tensorboard_dir, ):
+def test_func(global_ac, rank, E, TESTING, p2, args, device, tensorboard_dir, ):
     torch.manual_seed(args.seed + rank)
     np.random.seed(args.seed + rank)
     print("set up Test process env")
-    non_station_dir = os.path.join(tensorboard_dir, "test_{}".format("non_station"))
-    if not os.path.exists(non_station_dir):
-        os.makedirs(non_station_dir)
-    non_station_writer = SummaryWriter(log_dir=non_station_dir)
-    writers = []
-    for p2 in args.list:
-        temp_dir = os.path.join(tensorboard_dir, "test_{}".format(p2))
-        if not os.path.exists(temp_dir):
-            os.makedirs(temp_dir)
-        writer = SummaryWriter(log_dir=temp_dir)
-        writers.append(writer)
-    last_test = 0
+    temp_dir = os.path.join(tensorboard_dir, "test_{}".format(p2))
+    if not os.path.exists(temp_dir):
+        os.makedirs(temp_dir)
+    writer = SummaryWriter(log_dir=temp_dir)
     # Main loop: collect experience in env and update/log each epoch
     while E.value() <= args.episode:
-        e = E.value()
-        if e == last_test:
+        if TESTING[rank] != 1:
+            time.sleep(3)
             continue
-        last_test = e
-        if e > 0 and e % args.test_every==0:
-            # non_station evaluation
-            if args.exp_name == "test":
-                env = gym.make("CartPole-v0")
-            else:
-                env = make_ftg_ram_nonstation(args.env, p2_list=args.list, total_episode=args.test_episode,
-                                              stable=args.stable)
-            m_score, win_rate, steps = test_proc(global_ac, env, args, device)
-            test_summary("Non-Station", steps, m_score, win_rate, non_station_writer, args, e)
-            env.close()
-            # station evaluation
-            for index, p2 in enumerate(args.list):
-                if args.exp_name == "test":
-                    env = gym.make("CartPole-v0")
-                else:
-                    env = make_ftg_ram(args.env, p2=p2)
-                m_score, win_rate, steps = test_proc(global_ac, env, args, device)
-                test_summary(p2, steps, m_score, win_rate, writers[index], args, e)
-                env.close()
-
+        e = E.value()
+        print("TESTING process {} start to test, opp: {}".format(rank, p2))
+        # non_station evaluation
+        if args.exp_name == "test":
+            env = gym.make("CartPole-v0")
+        elif p2 == "Non-station":
+            env = make_ftg_ram_nonstation(args.env, p2_list=args.list, total_episode=args.test_episode,
+                                          stable=args.stable)
+        else:
+            env = make_ftg_ram(args.env, p2=p2)
+        m_score, win_rate, steps = test_proc(global_ac, env, args, device)
+        test_summary(p2, steps, m_score, win_rate, writer, args, e)
+        env.close()
+        del env
+        TESTING[rank] = 0
+        print("TESTING process {} finished, opp: {}".format(rank, p2))
+        print(TESTING)

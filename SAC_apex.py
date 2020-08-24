@@ -124,9 +124,11 @@ if __name__ == '__main__':
 
     # training setup
     T = Counter()
+    TESTING = mp.Manager().list([0, 0, 0, 0])
     E = Counter()
     buffer_q = mp.SimpleQueue()
     replay_buffer = ReplayBuffer(obs_dim=obs_dim, size=args.replay_size)
+    training_buffer = ReplayBuffer(obs_dim=obs_dim, size=args.replay_size)
 
     if os.path.exists(os.path.join(args.save_dir, args.exp_name, args.model_para)):
         global_ac.load_state_dict(torch.load(os.path.join(args.save_dir, args.exp_name, args.model_para)))
@@ -145,7 +147,6 @@ if __name__ == '__main__':
     glod_lower = None
     glod_upper = None
     last_updated = 0
-    old_size = 0
     if args.cuda:
         global_ac.to(device)
         global_ac_targ.to(device)
@@ -162,16 +163,19 @@ if __name__ == '__main__':
 
     processes = []
     # Process 0 for evaluation
-    for rank in range(args.n_process+1):
+    for rank in range(args.n_process+4): # 4 test process
         if rank == 0:
-            p = mp.Process(target=test_func, args=(global_ac, rank, E, args,device,tensorboard_dir))
+            p = mp.Process(target=test_func, args=(global_ac, rank, E, TESTING, "Non-station", args,device,tensorboard_dir))
+        elif rank < 4:
+            p = mp.Process(target=test_func, args=(global_ac, rank, E, TESTING, args.list[(rank-1) % len(args.list)], args, device, tensorboard_dir))
         else:
-            p = mp.Process(target=sac, args=(global_ac, rank, E, args, buffer_q,device,tensorboard_dir))
+            p = mp.Process(target=sac, args=(global_ac, rank, E, TESTING, args, buffer_q,device,tensorboard_dir))
         p.start()
         if not args.exp_name == "test":
             time.sleep(5)
         processes.append(p)
 
+    tested_e = 0
     while E.value() <= args.episode:
         # receive data from actors
         # print("Going to read data from ACTOR......")
@@ -179,19 +183,37 @@ if __name__ == '__main__':
         # print("Finish Reading data from ACTOR!!!!!!")
         transition = copy.deepcopy(received_obj)
         del received_obj
-        T.increment()
-        t = T.value()
+
         (o, a, r, o2, d, p2) = transition
         if glod_model is None:
             replay_buffer.store(o, a, r, o2, d, p2)
+            training_buffer.store(o, a, r, o2, d, p2)
         else:
             obs_glod_score = retrieve_scores(glod_model, np.expand_dims(o, axis=0), device=device, k=args.ood_K)
             if glod_lower <= obs_glod_score <= glod_upper:
-                replay_buffer.store(o, a, r, o2, d, p2)
+                training_buffer.store(o, a, r, o2, d, p2)
+            replay_buffer.store(o, a, r, o2, d, p2)
+
+        T.increment()
+        t = T.value()
+        e = E.value()
+
+        if sum(TESTING) > 0:
+            print("In the TESTING stage, pause the training processes...")
+            time.sleep(3)
+            continue
+
+        # enter the testing phase and pause the training
+        if e > 0 and e % args.test_every == 0 and tested_e != e:
+            print("TEST START")
+            for i in range(4):
+                TESTING[i] = 1
+            tested_e = e
+            continue
 
         # SAC Update handling
         if t >= args.update_after and t % args.update_every == 0:
-            batch = replay_buffer.sample_trans(args.batch_size, device=device)
+            batch = training_buffer.sample_trans(args.batch_size, device=device)
             # First run one gradient descent step for Q1 and Q2
             q1_optimizer.zero_grad()
             q2_optimizer.zero_grad()
@@ -225,31 +247,32 @@ if __name__ == '__main__':
             writer.add_scalar("training/alpha_loss", alpha_loss.detach().item(), t)
             writer.add_scalar("training/entropy", entropy.detach().mean().item(), t)
 
-        e = E.value()
+
         if e == last_updated:
             continue
         last_updated = e
         # OOD update stage
-        if (t >= args.update_after and e >= args.ood_starts and e % args.ood_update_rounds == 0 and replay_buffer.size > old_size or replay_buffer.is_full()) and args.ood:
+        if t >= args.update_after and e >= args.ood_starts and e % args.ood_update_rounds == 0 and args.ood:
             print(" OOD updating at rounds {}".format(e))
-            old_size = int(replay_buffer.size)
-            glod_idxs = np.random.randint(0, old_size, size=int(old_size * args.ood_train_per))
-            glod_input = replay_buffer.obs_buf[glod_idxs]
-            glod_target = replay_buffer.act_buf[glod_idxs]
-            glod_p2 = [p2 for index, p2 in enumerate(replay_buffer.p2_buf) if index in glod_idxs]
+            print("Replay Buffer Size: {}, Training Buffer Size: {}".format(replay_buffer.size, training_buffer.size))
+            glod_idxs = np.random.randint(0, training_buffer.size, size=int(training_buffer.size * args.ood_train_per))
+            glod_input = training_buffer.obs_buf[glod_idxs]
+            glod_target = training_buffer.act_buf[glod_idxs]
             ood_train = (glod_input, glod_target)
-            glod_model = convert_to_glod(global_ac.pi, train_loader=ood_train, hidden_dim=args.hid, act_dim=act_dim,
-                                         device=device)
-            glod_scores = retrieve_scores(glod_model, replay_buffer.obs_buf[:old_size], device=device, k=args.ood_K)
+            glod_model = convert_to_glod(global_ac.pi, train_loader=ood_train, hidden_dim=args.hid, act_dim=act_dim,device=device)
+            training_buffer = deepcopy(replay_buffer)
+            glod_scores = retrieve_scores(glod_model, replay_buffer.obs_buf[:training_buffer.size], device=device, k=args.ood_K)
             glod_scores = glod_scores.detach().cpu().numpy()
+            glod_p2 = training_buffer.p2_buf[:training_buffer.size]
             drop_points = np.percentile(a=glod_scores, q=[args.ood_drop_lower, args.ood_drop_upper])
             glod_lower, glod_upper = drop_points[0], drop_points[1]
             mask = np.logical_and((glod_scores >= glod_lower), (glod_scores <= glod_upper))
             reserved_indexes = np.argwhere(mask).flatten()
             if len(reserved_indexes) > 0:
-                replay_buffer.ood_drop(reserved_indexes)
+                training_buffer.ood_drop(reserved_indexes)
             writer.add_histogram(values=glod_scores, max_bins=300, global_step=e, tag="OOD")
-            torch.save((glod_scores, replay_buffer.p2_buf[:old_size]), os.path.join(args.save_dir, args.exp_name, "glod_info_{}".format(e)))
+            print("Replay Buffer Size: {}, Training Buffer Size: {}".format(replay_buffer.size, training_buffer.size))
+            torch.save((glod_scores, replay_buffer.p2_buf[:replay_buffer.size]), os.path.join(args.save_dir, args.exp_name, "glod_info_{}".format(e)))
 
         if e % args.save_freq == 0 and e > 0 and t >= args.update_after:
             torch.save(global_ac.state_dict(), os.path.join(args.save_dir, args.exp_name, args.model_para))
