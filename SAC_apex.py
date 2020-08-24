@@ -169,7 +169,7 @@ if __name__ == '__main__':
         elif rank < 4:
             p = mp.Process(target=test_func, args=(global_ac, rank, E, TESTING, args.list[(rank-1) % len(args.list)], args, device, tensorboard_dir))
         else:
-            p = mp.Process(target=sac, args=(global_ac, rank, E, TESTING, args, buffer_q,device,tensorboard_dir))
+            p = mp.Process(target=sac, args=(global_ac, rank, E, args, buffer_q,device,tensorboard_dir))
         p.start()
         if not args.exp_name == "test":
             time.sleep(5)
