@@ -56,7 +56,7 @@ class GaussianLayer(nn.Module):
 
 def retrieve_scores(model, loader, device, k):
     preds = predict(model, loader, device)
-    top_k = preds.topk(k).values.squeeze()
+    top_k = preds.topk(k).values
     avg_ll = np.mean(top_k[:, 1:k].cpu().detach().numpy())
     llr = top_k[:, 0].cpu()-avg_ll
     return llr
@@ -113,7 +113,7 @@ def predict(model, loader, device):
     with torch.no_grad():
         # for batch_idx, (inputs, _) in enumerate(loader):
         # for inputs,_ in tqdm(loader):
-        inputs = torch.tensor(loader,device=device)
+        inputs = torch.tensor(loader,device=device,dtype=torch.float)
         outputs = model(inputs)
         predictions.append(outputs)
     predictions = torch.cat(predictions).to(device)

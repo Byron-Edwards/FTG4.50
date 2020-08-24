@@ -9,11 +9,10 @@ from OppModeling.SAC import MLPActorCritic
 from OppModeling.ReplayBuffer import ReplayBuffer, ReplayBufferOppo, ReplayBufferShare
 from OppModeling.atari_wrappers import make_ftg_ram,make_ftg_ram_nonstation
 from OppModeling.model_parameter_trans import state_dict_trans
-from OOD.glod import convert_to_glod, retrieve_scores
+from OOD.glod import convert_to_glod, retrieve_scores,ood_scores
 
 
-
-def sac(global_ac, global_ac_targ, rank, T, E, args, scores, wins,buffer, device=None, tensorboard_dir=None,):
+def sac(global_ac, global_ac_targ, rank, T, E, args, scores, wins,buffer_q, device=None, tensorboard_dir=None,):
     torch.manual_seed(args.seed + rank)
     np.random.seed(args.seed + rank)
     # writer = GlobalSummaryWriter.getSummaryWriter()
@@ -42,9 +41,6 @@ def sac(global_ac, global_ac_targ, rank, T, E, args, scores, wins,buffer, device
 
     # Experience buffer
     replay_buffer = ReplayBuffer(obs_dim=obs_dim, size=args.replay_size)
-    # replay_buffer = ReplayBufferShare(buffer=buffer, size=args.replay_size)
-    # if args.traj_dir:
-    #     replay_buffer.store_trajectory(load_trajectory(args.traj_dir))
 
     # Entropy Tuning
     target_entropy = -torch.prod(torch.Tensor(env.action_space.shape).to(device)).item()  # heuristic value from the paper
@@ -128,29 +124,26 @@ def sac(global_ac, global_ac_targ, rank, T, E, args, scores, wins,buffer, device
         # OOD update stage
         if (local_t >= args.ood_update_step and local_t % args.ood_update_step == 0 or replay_buffer.is_full()) and args.ood:
             # used all the data collected from the last args.ood_update_steps as the train data
-            print("Conduct OOD updating")
+            print(" OOD updating")
             ood_train = (glod_input, glod_target)
             glod_model = convert_to_glod(global_ac.pi,train_loader=ood_train, hidden_dim=args.hid, act_dim=act_dim, device=device)
             glod_scores = retrieve_scores(glod_model, replay_buffer.obs_buf[:replay_buffer.size], device=device, k=args.ood_K)
             glod_scores = glod_scores.detach().cpu().numpy()
-            print(len(glod_scores))
             writer.add_histogram(values=glod_scores, max_bins=300, global_step=local_t, tag="OOD")
             drop_points = np.percentile(a=glod_scores, q=[args.ood_drop_lower, args.ood_drop_upper])
             lower, upper = drop_points[0], drop_points[1]
-            print(lower,upper)
             mask = np.logical_and((glod_scores >= lower), (glod_scores <= upper))
             reserved_indexes = np.argwhere(mask).flatten()
-            print(len(reserved_indexes))
             if len(reserved_indexes) > 0:
                 replay_buffer.ood_drop(reserved_indexes)
                 glod_input = list()
                 glod_target = list()
 
-        # Update handling
-        if local_t >= args.update_after and local_t % args.update_every == 0:
+        # SAC Update handling
+        if local_e >= args.update_after and local_t % args.update_every == 0:
             for j in range(args.update_every):
 
-                batch = replay_buffer.sample_batch(args.batch_size,device=device)
+                batch = replay_buffer.sample_trans(args.batch_size,device=device)
                 # First run one gradient descent step for Q1 and Q2
                 q1_optimizer.zero_grad()
                 q2_optimizer.zero_grad()
@@ -217,15 +210,23 @@ def sac_opp(global_ac, global_ac_targ, global_cpc, rank, T, E, args, scores, win
     local_ac.load_state_dict(global_ac.state_dict())
     print("local ac load global ac")
 
+    # Freeze target networks with respect to optimizers (only update via polyak averaging)
+    # Async Version
     for p in global_ac_targ.parameters():
         p.requires_grad = False
 
-    replay_buffer = ReplayBufferOppo(obs_dim=obs_dim,max_size=args.replay_size,encoder=global_cpc)
+    # Experience buffer
+    if args.cpc:
+        replay_buffer = ReplayBufferOppo(obs_dim=obs_dim,max_size=args.replay_size,encoder=global_cpc)
+    else:
+        replay_buffer = ReplayBuffer(obs_dim=obs_dim, size=args.replay_size)
 
     # Entropy Tuning
     target_entropy = -torch.prod(torch.Tensor(env.action_space.shape).to(device)).item()  # heuristic value from the paper
     alpha = max(local_ac.log_alpha.exp().item(), args.min_alpha) if not args.fix_alpha else args.min_alpha
 
+    # Set up optimizers for policy and q-function
+    # Async Version
     pi_optimizer = Adam(global_ac.pi.parameters(), lr=args.lr, eps=1e-4)
     q1_optimizer = Adam(global_ac.q1.parameters(), lr=args.lr, eps=1e-4)
     q2_optimizer = Adam(global_ac.q2.parameters(), lr=args.lr, eps=1e-4)
@@ -233,21 +234,43 @@ def sac_opp(global_ac, global_ac_targ, global_cpc, rank, T, E, args, scores, win
     alpha_optim = Adam([global_ac.log_alpha], lr=args.lr, eps=1e-4)
 
     # Prepare for interaction with environment
-    c_hidden = global_cpc.init_hidden(1, args.c_dim, use_gpu=args.cuda)
     o, ep_ret, ep_len = env.reset(), 0, 0
-    c1, c_hidden = global_cpc.predict(o, c_hidden)
-    assert len(c1.shape) == 3
-    c1 = c1.flatten().cpu().numpy()
+    if args.cpc:
+        c_hidden = global_cpc.init_hidden(1, args.c_dim, use_gpu=args.cuda)
+        c1, c_hidden = global_cpc.predict(o, c_hidden)
+        assert len(c1.shape) == 3
+        c1 = c1.flatten().cpu().numpy()
+        all_embeddings = []
+        meta = []
     trajectory = list()
+    p2 = env.p2
+    p2_list = [str(p2)]
     discard = False
-    local_t, local_e = 0,0
+    uncertainties = []
+    local_t, local_e = 0, 0
     t = T.value()
     e = E.value()
+    glod_input = list()
+    glod_target = list()
+    # Main loop: collect experience in env and update/log each epoch
     while e <= args.episode:
-        if t > args.start_steps:
-            a = local_ac.get_action(np.concatenate((o, c1), axis=0), device=device)
-        else:
-            a = env.action_space.sample()
+        with torch.no_grad():
+            # Until start_steps have elapsed, randomly sample actions
+            # from a uniform distribution for better exploration. Afterwards,
+            # use the learned policy.
+            if t > args.start_steps:
+                if args.cpc:
+                    a = local_ac.get_action(np.concatenate((o, c1), axis=0), device=device)
+                    a_prob = local_ac.act(
+                        torch.as_tensor(np.expand_dims(np.concatenate((o, c1), axis=0), axis=0), dtype=torch.float32,
+                                        device=device))
+                else:
+                    a = local_ac.get_action(o, greedy=True, device=device)
+                    a_prob = local_ac.act(torch.as_tensor(np.expand_dims(o, axis=0), dtype=torch.float32, device=device))
+            else:
+                a = env.action_space.sample()
+                a_prob = local_ac.act(torch.as_tensor(np.expand_dims(o, axis=0), dtype=torch.float32, device=device))
+        uncertainty = ood_scores(a_prob).item()
 
         # Step the env
         o2, r, d, info = env.step(a)
@@ -260,25 +283,35 @@ def sac_opp(global_ac, global_ac_targ, global_cpc, rank, T, E, args, scores, win
         # horizon (that is, when it's an artificial terminal signal
         # that isn't based on the agent's state)
         d = False if (ep_len == args.max_ep_len) or discard else d
-        c2, c_hidden = global_cpc.predict(o2, c_hidden)
-        assert len(c2.shape) == 3
-        c2 = c2.flatten().cpu().numpy()
-        trajectory.append([o, a, r, o2, d, c1, c2])
+        glod_input.append(o), glod_target.append(a)
+
+        if args.cpc:
+            # changed the trace structure for further analysis
+            c2, c_hidden = global_cpc.predict(o2, c_hidden)
+            assert len(c2.shape) == 3
+            c2 = c2.flatten().cpu().numpy()
+            replay_buffer.store(np.concatenate((o, c1), axis=0), a, r, np.concatenate((o2, c2), axis=0), d)
+            trajectory.append([o, a, r, o2, d, c1, c2, ep_len])
+            all_embeddings.append(c1)
+            meta.append([env.p2, local_e, ep_len, r, a, uncertainty])
+            c1 = c2
+            trajectory.append([o, a, r, o2, d, c1, c2])
+        else:
+            replay_buffer.store(o, a, r, o2, d)
 
         # Super critical, easy to overlook step: make sure to update
         # most recent observation!
         o = o2
-        c1 = c2
-
         T.increment()
-        local_t += 1
         t = T.value()
+        local_t += 1
+
         # End of trajectory handling
         if d or (ep_len == args.max_ep_len) or discard:
             replay_buffer.store(trajectory)
             E.increment()
-            local_e += 1
             e = E.value()
+            local_e += 1
             # logger.store(EpRet=ep_ret, EpLen=ep_len)
             if info.get('win', False):
                 wins.append(1)
@@ -297,7 +330,7 @@ def sac_opp(global_ac, global_ac_targ, global_cpc, rank, T, E, args, scores, win
             writer.add_scalar("metrics/alpha", alpha, e)
 
             # CPC update handing
-            if local_e > args.batch_size and local_e % args.update_every == 0:
+            if local_e > args.batch_size and local_e % args.update_every == 0 and args.cpc:
                 data, indexes, min_len = replay_buffer.sample_traj(args.batch_size)
                 global_cpc.train()
                 cpc_optimizer.zero_grad()
@@ -313,10 +346,33 @@ def sac_opp(global_ac, global_ac_targ, global_cpc, rank, T, E, args, scores, win
                 writer.add_scalar("training/acc", acc, e)
                 writer.add_scalar("training/cpc_loss", loss.detach().item(), e)
 
-            c_hidden = global_cpc.init_hidden(1, args.c_dim, use_gpu=args.cuda)
+                all_embeddings = np.array(all_embeddings)
+                writer.add_embedding(mat=all_embeddings, metadata=meta, metadata_header=["opponent", "round", "step", "reward", "action","uncertainty"])
+                c_hidden = global_cpc.init_hidden(1, args.c_dim, use_gpu=args.cuda)
             o, ep_ret, ep_len = env.reset(), 0, 0
             trajectory = list()
             discard = False
+
+        # OOD update stage
+        if (t >= args.ood_update_step and local_t % args.ood_update_step == 0 or replay_buffer.is_full()) and args.ood:
+            # used all the data collected from the last args.ood_update_steps as the train data
+            print("Conduct OOD updating")
+            ood_train = (glod_input, glod_target)
+            glod_model = convert_to_glod(global_ac.pi,train_loader=ood_train, hidden_dim=args.hid, act_dim=act_dim, device=device)
+            glod_scores = retrieve_scores(glod_model, replay_buffer.obs_buf[:replay_buffer.size], device=device, k=args.ood_K)
+            glod_scores = glod_scores.detach().cpu().numpy()
+            print(len(glod_scores))
+            writer.add_histogram(values=glod_scores, max_bins=300, global_step=local_t, tag="OOD")
+            drop_points = np.percentile(a=glod_scores, q=[args.ood_drop_lower, args.ood_drop_upper])
+            lower, upper = drop_points[0], drop_points[1]
+            print(lower,upper)
+            mask = np.logical_and((glod_scores >= lower), (glod_scores <= upper))
+            reserved_indexes = np.argwhere(mask).flatten()
+            print(len(reserved_indexes))
+            if len(reserved_indexes) > 0:
+                replay_buffer.ood_drop(reserved_indexes)
+                glod_input = list()
+                glod_target = list()
 
         # SAC Update handling
         if local_t >= args.update_after and local_t % args.update_every == 0:

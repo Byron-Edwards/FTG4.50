@@ -11,20 +11,21 @@ class ReplayBuffer:
 
     def __init__(self, obs_dim, size):
         self.obs_dim = obs_dim
-        self.size = size
         self.obs_buf = np.zeros(combined_shape(size, obs_dim), dtype=np.float32)
         self.obs2_buf = np.zeros(combined_shape(size, obs_dim), dtype=np.float32)
         self.act_buf = np.zeros(size, dtype=np.float32)
         self.rew_buf = np.zeros(size, dtype=np.float32)
         self.done_buf = np.zeros(size, dtype=np.float32)
+        self.p2_buf = np.array([None for i in range(size)])
         self.ptr, self.size, self.max_size = 0, 0, size
 
-    def store(self, obs, act, rew, next_obs, done):
+    def store(self, obs, act, rew, next_obs, done, p2=None):
         self.obs_buf[self.ptr] = obs
         self.obs2_buf[self.ptr] = next_obs
         self.act_buf[self.ptr] = act
         self.rew_buf[self.ptr] = rew
         self.done_buf[self.ptr] = done
+        self.p2_buf[self.ptr] = p2
         self.ptr = (self.ptr + 1) % self.max_size
         self.size = min(self.size + 1, self.max_size)
 
@@ -32,7 +33,7 @@ class ReplayBuffer:
         for i in trajectory:
             self.store(i["obs"], i["action"], i["reward"], i["next_obs"], i["done"])
 
-    def sample_batch(self, batch_size=32, device=None):
+    def sample_trans(self, batch_size=32, device=None):
         idxs = np.random.randint(0, self.size, size=batch_size)
         batch = dict(obs=self.obs_buf[idxs],
                      obs2=self.obs2_buf[idxs],
@@ -57,6 +58,8 @@ class ReplayBuffer:
         self.rew_buf[reserved_len:] = 0
         self.done_buf[:reserved_len] = self.done_buf[reserved_indexes]
         self.done_buf[reserved_len:] = 0
+        self.p2_buf[:reserved_len] = self.p2_buf[reserved_indexes]
+        self.p2_buf[reserved_len:] = 0
         self.size = min(reserved_len, self.max_size)
         self.ptr = self.size
         print("after ood drop: {}".format(self.size))
@@ -158,4 +161,7 @@ class ReplayBufferOppo:
                 self.trajectories[index][j][-2] = latents[i][j].cpu().numpy() # update c1
                 self.trajectories[index][j][-1] = latents[i][j+1].cpu().numpy()   # update c2
         print("updated latents")
+
+    def is_full(self):
+        return self.size == self.max_size
 
