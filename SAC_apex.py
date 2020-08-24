@@ -41,7 +41,7 @@ if __name__ == '__main__':
     parser.add_argument('--hid', type=int, default=256)
     parser.add_argument('--l', type=int, default=2, help="layers")
     parser.add_argument('--episode', type=int, default=100000)
-    parser.add_argument('--update_after', type=int, default=10000)
+    parser.add_argument('--update_after', type=int, default=100)
     parser.add_argument('--update_every', type=int, default=3)
     parser.add_argument('--max_ep_len', type=int, default=1000)
     parser.add_argument('--min_alpha', type=float, default=0.3)
@@ -169,7 +169,7 @@ if __name__ == '__main__':
         elif rank < 4:
             p = mp.Process(target=test_func, args=(global_ac, rank, E, TESTING, args.list[(rank-1) % len(args.list)], args, device, tensorboard_dir))
         else:
-            p = mp.Process(target=sac, args=(global_ac, rank, E, args, buffer_q,device,tensorboard_dir))
+            p = mp.Process(target=sac, args=(global_ac, rank, E, args,  buffer_q,device,tensorboard_dir))
         p.start()
         if not args.exp_name == "test":
             time.sleep(5)
@@ -198,6 +198,36 @@ if __name__ == '__main__':
         t = T.value()
         e = E.value()
 
+        # Even testing do not stop the training for OOD
+        if e == last_updated:
+            continue
+        last_updated = e
+        # OOD update stage
+        if e >= args.ood_starts and e % args.ood_update_rounds == 0 and args.ood:
+            print(" OOD updating at rounds {}".format(e))
+            print("Replay Buffer Size: {}, Training Buffer Size: {}".format(replay_buffer.size, training_buffer.size))
+            glod_idxs = np.random.randint(0, training_buffer.size, size=int(training_buffer.size * args.ood_train_per))
+            glod_input = training_buffer.obs_buf[glod_idxs]
+            glod_target = training_buffer.act_buf[glod_idxs]
+            ood_train = (glod_input, glod_target)
+            glod_model = convert_to_glod(global_ac.pi, train_loader=ood_train, hidden_dim=args.hid, act_dim=act_dim,
+                                         device=device)
+            training_buffer = deepcopy(replay_buffer)
+            glod_scores = retrieve_scores(glod_model, replay_buffer.obs_buf[:training_buffer.size], device=device,
+                                          k=args.ood_K)
+            glod_scores = glod_scores.detach().cpu().numpy()
+            glod_p2 = training_buffer.p2_buf[:training_buffer.size]
+            drop_points = np.percentile(a=glod_scores, q=[args.ood_drop_lower, args.ood_drop_upper])
+            glod_lower, glod_upper = drop_points[0], drop_points[1]
+            mask = np.logical_and((glod_scores >= glod_lower), (glod_scores <= glod_upper))
+            reserved_indexes = np.argwhere(mask).flatten()
+            if len(reserved_indexes) > 0:
+                training_buffer.ood_drop(reserved_indexes)
+            writer.add_histogram(values=glod_scores, max_bins=300, global_step=e, tag="OOD")
+            print("Replay Buffer Size: {}, Training Buffer Size: {}".format(replay_buffer.size, training_buffer.size))
+            torch.save((glod_scores, replay_buffer.p2_buf[:replay_buffer.size]),
+                       os.path.join(args.save_dir, args.exp_name, "glod_info_{}".format(e)))
+
         if sum(TESTING) > 0:
             print("In the TESTING stage, pause the training processes...")
             time.sleep(3)
@@ -212,7 +242,7 @@ if __name__ == '__main__':
             continue
 
         # SAC Update handling
-        if t >= args.update_after and t % args.update_every == 0:
+        if e >= args.update_after and t % args.update_every == 0:
             batch = training_buffer.sample_trans(args.batch_size, device=device)
             # First run one gradient descent step for Q1 and Q2
             q1_optimizer.zero_grad()
@@ -247,32 +277,6 @@ if __name__ == '__main__':
             writer.add_scalar("training/alpha_loss", alpha_loss.detach().item(), t)
             writer.add_scalar("training/entropy", entropy.detach().mean().item(), t)
 
-
-        if e == last_updated:
-            continue
-        last_updated = e
-        # OOD update stage
-        if t >= args.update_after and e >= args.ood_starts and e % args.ood_update_rounds == 0 and args.ood:
-            print(" OOD updating at rounds {}".format(e))
-            print("Replay Buffer Size: {}, Training Buffer Size: {}".format(replay_buffer.size, training_buffer.size))
-            glod_idxs = np.random.randint(0, training_buffer.size, size=int(training_buffer.size * args.ood_train_per))
-            glod_input = training_buffer.obs_buf[glod_idxs]
-            glod_target = training_buffer.act_buf[glod_idxs]
-            ood_train = (glod_input, glod_target)
-            glod_model = convert_to_glod(global_ac.pi, train_loader=ood_train, hidden_dim=args.hid, act_dim=act_dim,device=device)
-            training_buffer = deepcopy(replay_buffer)
-            glod_scores = retrieve_scores(glod_model, replay_buffer.obs_buf[:training_buffer.size], device=device, k=args.ood_K)
-            glod_scores = glod_scores.detach().cpu().numpy()
-            glod_p2 = training_buffer.p2_buf[:training_buffer.size]
-            drop_points = np.percentile(a=glod_scores, q=[args.ood_drop_lower, args.ood_drop_upper])
-            glod_lower, glod_upper = drop_points[0], drop_points[1]
-            mask = np.logical_and((glod_scores >= glod_lower), (glod_scores <= glod_upper))
-            reserved_indexes = np.argwhere(mask).flatten()
-            if len(reserved_indexes) > 0:
-                training_buffer.ood_drop(reserved_indexes)
-            writer.add_histogram(values=glod_scores, max_bins=300, global_step=e, tag="OOD")
-            print("Replay Buffer Size: {}, Training Buffer Size: {}".format(replay_buffer.size, training_buffer.size))
-            torch.save((glod_scores, replay_buffer.p2_buf[:replay_buffer.size]), os.path.join(args.save_dir, args.exp_name, "glod_info_{}".format(e)))
 
         if e % args.save_freq == 0 and e > 0 and t >= args.update_after:
             torch.save(global_ac.state_dict(), os.path.join(args.save_dir, args.exp_name, args.model_para))
