@@ -63,6 +63,7 @@ def sac(global_ac, global_ac_targ, rank, T, E, args, scores, wins, buffer_q, dev
     glod_lower = None
     glod_upper = None
     last_updated = 0
+    saved_e = 0
     t = T.value()
     e = E.value()
     local_t, local_e = 0, 0
@@ -205,11 +206,12 @@ def sac(global_ac, global_ac_targ, rank, T, E, args, scores, wins, buffer_q, dev
                 writer.add_scalar("training/alpha_loss", alpha_loss.detach().item(), t)
                 writer.add_scalar("training/entropy", entropy.detach().mean().item(), t)
 
-        if e % args.save_freq == 0 and e > 0:
+        if e % args.save_freq == 0 and e > 0 and e != saved_e:
             torch.save(global_ac.state_dict(), os.path.join(args.save_dir, args.exp_name, "model_torch_{}".format(e)))
             state_dict_trans(global_ac.state_dict(), os.path.join(args.save_dir, args.exp_name,  "model_numpy_{}".format(e)))
             torch.save((e, t, list(scores), list(wins)), os.path.join(args.save_dir, args.exp_name, "model_data_{}".format(e)))
             print("Saving model at episode:{}".format(t))
+            saved_e = e
 
 
 def sac_opp(global_ac, global_ac_targ, global_cpc, rank, T, E, args, scores, wins, buffer, device=None, tensorboard_dir=None, ):
