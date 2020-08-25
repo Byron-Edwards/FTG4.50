@@ -137,7 +137,7 @@ def sac(global_ac, global_ac_targ, rank, T, E, args, scores, wins, buffer_q, dev
             discard = False
 
         # OOD update stage, can only use CPU as the GPU memory can not hold so much data
-        if e >= args.ood_starts and e % args.ood_update_rounds == 0 and args.ood and e != last_updated:
+        if local_e >= args.ood_starts and local_e % args.ood_update_rounds == 0 and args.ood and local_e != last_updated:
             print("OOD updating at rounds {}".format(e))
             print("Replay Buffer Size: {}, Training Buffer Size: {}".format(replay_buffer.size, training_buffer.size))
             glod_idxs = np.random.randint(0, training_buffer.size, size=int(training_buffer.size * args.ood_train_per))
