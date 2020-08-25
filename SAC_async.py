@@ -18,7 +18,7 @@ if __name__ == '__main__':
     # running setting
     parser.add_argument('--cuda', default=False, action='store_true')
     parser.add_argument('--seed', '-s', type=int, default=0)
-    parser.add_argument('--n_process', type=int, default=8)
+    parser.add_argument('--n_process', type=int, default=1)
     # basic env setting
     parser.add_argument('--env', type=str, default="FightingiceDataFrameskip-v0")
     parser.add_argument('--p2', type=str, default="Toothless")
@@ -34,7 +34,7 @@ if __name__ == '__main__':
     parser.add_argument('--l', type=int, default=2, help="layers")
     parser.add_argument('--episode', type=int, default=100000)
     parser.add_argument('--start_steps', type=int, default=1000)
-    parser.add_argument('--update_after', type=int, default=1000)
+    parser.add_argument('--update_after', type=int, default=100)
     parser.add_argument('--update_every', type=int, default=1)
     parser.add_argument('--max_ep_len', type=int, default=1000)
     parser.add_argument('--min_alpha', type=float, default=0.3)
@@ -49,12 +49,14 @@ if __name__ == '__main__':
     parser.add_argument('--timestep', type=int, default=10)
     # OOD setting
     parser.add_argument('--ood', default=False, action="store_true")
-    parser.add_argument('--ood_K', type=int, default=15)
-    parser.add_argument('--ood_update_step', type=int, default=2000)
+    parser.add_argument('--ood_K', type=int, default=13)
+    parser.add_argument('--ood_starts', type=int, default=100)
+    parser.add_argument('--ood_train_per', type=float, default=0.25)
+    parser.add_argument('--ood_update_rounds', type=int, default=50)
     parser.add_argument('--ood_drop_lower',type=int, default=10)
-    parser.add_argument('--ood_drop_upper', type=int, default=90)
+    parser.add_argument('--ood_drop_upper', type=int, default=60)
     # Saving settings
-    parser.add_argument('--save_freq', type=int, default=1000)
+    parser.add_argument('--save_freq', type=int, default=100)
     parser.add_argument('--exp_name', type=str, default='test')
     parser.add_argument('--save-dir', type=str, default="./experiments")
     parser.add_argument('--traj_dir', type=str, default="./experiments")

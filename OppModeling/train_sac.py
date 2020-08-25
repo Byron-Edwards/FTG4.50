@@ -2,7 +2,9 @@ import os
 import gym
 import numpy as np
 import torch
+
 import torch.nn as nn
+from copy import deepcopy
 from torch.optim import Adam
 from torch.utils.tensorboard import SummaryWriter
 from OppModeling.SAC import MLPActorCritic
@@ -12,7 +14,7 @@ from OppModeling.model_parameter_trans import state_dict_trans
 from OOD.glod import convert_to_glod, retrieve_scores,ood_scores
 
 
-def sac(global_ac, global_ac_targ, rank, T, E, args, scores, wins,buffer_q, device=None, tensorboard_dir=None,):
+def sac(global_ac, global_ac_targ, rank, T, E, args, scores, wins, buffer_q, device=None, tensorboard_dir=None,):
     torch.manual_seed(args.seed + rank)
     np.random.seed(args.seed + rank)
     # writer = GlobalSummaryWriter.getSummaryWriter()
@@ -41,6 +43,7 @@ def sac(global_ac, global_ac_targ, rank, T, E, args, scores, wins,buffer_q, devi
 
     # Experience buffer
     replay_buffer = ReplayBuffer(obs_dim=obs_dim, size=args.replay_size)
+    training_buffer = ReplayBuffer(obs_dim=obs_dim, size=args.replay_size)
 
     # Entropy Tuning
     target_entropy = -torch.prod(torch.Tensor(env.action_space.shape).to(device)).item()  # heuristic value from the paper
@@ -55,13 +58,14 @@ def sac(global_ac, global_ac_targ, rank, T, E, args, scores, wins,buffer_q, devi
 
     # Prepare for interaction with environment
     o, ep_ret, ep_len = env.reset(), 0, 0
-    trajectory = list()
     discard = False
+    glod_model = None
+    glod_lower = None
+    glod_upper = None
+    last_updated = 0
     t = T.value()
     e = E.value()
     local_t, local_e = 0, 0
-    glod_input = list()
-    glod_target = list()
     # Main loop: collect experience in env and update/log each epoch
     while e <= args.episode:
 
@@ -72,9 +76,21 @@ def sac(global_ac, global_ac_targ, rank, T, E, args, scores, wins,buffer_q, devi
             a = local_ac.get_action(o, device=device)
         else:
             a = env.action_space.sample()
-
+        if hasattr(env, 'p2'):
+            p2 = env.p2
+        else:
+            p2 = None
         # Step the env
         o2, r, d, info = env.step(a)
+        if glod_model is None:
+            replay_buffer.store(o, a, r, o2, d, str(p2))
+            training_buffer.store(o, a, r, o2, d, str(p2))
+        else:
+            obs_glod_score = retrieve_scores(glod_model, np.expand_dims(o, axis=0), device=device, k=args.ood_K)
+            if glod_lower <= obs_glod_score <= glod_upper:
+                training_buffer.store(o, a, r, o2, d, str(p2))
+            replay_buffer.store(o, a, r, o2, d, str(p2))
+
         if info.get('no_data_receive', False):
             discard = True
         ep_ret += r
@@ -84,7 +100,6 @@ def sac(global_ac, global_ac_targ, rank, T, E, args, scores, wins,buffer_q, devi
         # horizon (that is, when it's an artificial terminal signal
         # that isn't based on the agent's state)
         d = False if (ep_len == args.max_ep_len) or discard else d
-        glod_input.append(o), glod_target.append(a)
         # Store experience to replay buffer
         replay_buffer.store(o, a, r, o2, d)
 
@@ -121,23 +136,31 @@ def sac(global_ac, global_ac_targ, rank, T, E, args, scores, wins,buffer_q, devi
             trajectory = list()
             discard = False
 
-        # OOD update stage
-        if (local_t >= args.ood_update_step and local_t % args.ood_update_step == 0 or replay_buffer.is_full()) and args.ood:
-            # used all the data collected from the last args.ood_update_steps as the train data
-            print(" OOD updating")
+        # OOD update stage, can only use CPU as the GPU memory can not hold so much data
+        if e >= args.ood_starts and e % args.ood_update_rounds == 0 and args.ood and e != last_updated:
+            print(" OOD updating at rounds {}".format(e))
+            print("Replay Buffer Size: {}, Training Buffer Size: {}".format(replay_buffer.size, training_buffer.size))
+            glod_idxs = np.random.randint(0, training_buffer.size, size=int(training_buffer.size * args.ood_train_per))
+            glod_input = training_buffer.obs_buf[glod_idxs]
+            glod_target = training_buffer.act_buf[glod_idxs]
             ood_train = (glod_input, glod_target)
-            glod_model = convert_to_glod(global_ac.pi,train_loader=ood_train, hidden_dim=args.hid, act_dim=act_dim, device=device)
-            glod_scores = retrieve_scores(glod_model, replay_buffer.obs_buf[:replay_buffer.size], device=device, k=args.ood_K)
+            glod_model = convert_to_glod(global_ac.pi, train_loader=ood_train, hidden_dim=args.hid, act_dim=act_dim,
+                                         device=device)
+            training_buffer = deepcopy(replay_buffer)
+            glod_scores = retrieve_scores(glod_model, replay_buffer.obs_buf[:training_buffer.size], device=device,
+                                          k=args.ood_K)
             glod_scores = glod_scores.detach().cpu().numpy()
-            writer.add_histogram(values=glod_scores, max_bins=300, global_step=local_t, tag="OOD")
+            glod_p2 = training_buffer.p2_buf[:training_buffer.size]
             drop_points = np.percentile(a=glod_scores, q=[args.ood_drop_lower, args.ood_drop_upper])
-            lower, upper = drop_points[0], drop_points[1]
-            mask = np.logical_and((glod_scores >= lower), (glod_scores <= upper))
+            glod_lower, glod_upper = drop_points[0], drop_points[1]
+            mask = np.logical_and((glod_scores >= glod_lower), (glod_scores <= glod_upper))
             reserved_indexes = np.argwhere(mask).flatten()
             if len(reserved_indexes) > 0:
-                replay_buffer.ood_drop(reserved_indexes)
-                glod_input = list()
-                glod_target = list()
+                training_buffer.ood_drop(reserved_indexes)
+            writer.add_histogram(values=glod_scores, max_bins=300, global_step=e, tag="OOD")
+            print("Replay Buffer Size: {}, Training Buffer Size: {}".format(replay_buffer.size, training_buffer.size))
+            torch.save((glod_scores, glod_p2),os.path.join(args.save_dir, args.exp_name, "glod_info_{}".format(e)))
+            last_updated = e
 
         # SAC Update handling
         if local_e >= args.update_after and local_t % args.update_every == 0:
@@ -182,10 +205,10 @@ def sac(global_ac, global_ac_targ, rank, T, E, args, scores, wins,buffer_q, devi
                 writer.add_scalar("training/alpha_loss", alpha_loss.detach().item(), t)
                 writer.add_scalar("training/entropy", entropy.detach().mean().item(), t)
 
-        if t % args.save_freq == 0 and t > 0:
-            torch.save(global_ac.state_dict(), os.path.join(args.save_dir, args.exp_name, args.model_para))
-            state_dict_trans(global_ac.state_dict(), os.path.join(args.save_dir, args.exp_name,  args.numpy_para))
-            torch.save((e, t, list(scores), list(wins)), os.path.join(args.save_dir, args.exp_name, args.train_indicator))
+        if e % args.save_freq == 0 and e > 0:
+            torch.save(global_ac.state_dict(), os.path.join(args.save_dir, args.exp_name, "model_torch_{}".format(e)))
+            state_dict_trans(global_ac.state_dict(), os.path.join(args.save_dir, args.exp_name,  "model_numpy_{}".format(e)))
+            torch.save((e, t, list(scores), list(wins)), os.path.join(args.save_dir, args.exp_name, "model_data_{}".format(e)))
             print("Saving model at episode:{}".format(t))
 
 

@@ -64,7 +64,7 @@ if __name__ == '__main__':
     parser.add_argument('--ood_drop_upper', type=int, default=60)
     # evaluation settings
     parser.add_argument('--test_episode', type=int, default=10)
-    parser.add_argument('--test_every', type=int, default=200)
+    parser.add_argument('--test_every', type=int, default=100)
     # Saving settings
     parser.add_argument('--save_freq', type=int, default=100)
     parser.add_argument('--exp_name', type=str, default='test')
@@ -108,11 +108,13 @@ if __name__ == '__main__':
     if args.cpc:
         global_ac = MLPActorCritic(obs_dim+args.c_dim, act_dim, **ac_kwargs)
         global_cpc = CPC(timestep=args.timestep, obs_dim=obs_dim, hidden_sizes=[args.hid] * args.l, z_dim=args.z_dim,c_dim=args.c_dim)
-        global_cpc.share_memory()
     else:
         global_ac = MLPActorCritic(obs_dim, act_dim, **ac_kwargs)
         global_cpc = None
+    # create shared model for actor
+    shared_ac = deepcopy(global_ac).cpu()
     global_ac_targ = deepcopy(global_ac)
+
     target_entropy = -torch.prod(torch.Tensor(env.action_space.shape).to(device)).item()  # heuristic value from the paper
     alpha = max(global_ac.log_alpha.exp().item(), args.min_alpha) if not args.fix_alpha else args.min_alpha
     pi_optimizer = Adam(global_ac.pi.parameters(), lr=args.lr, eps=1e-4)
@@ -124,9 +126,7 @@ if __name__ == '__main__':
 
     # training setup
     T = Counter()
-    TESTING = mp.Manager().list([0, 0, 0, 0])
     E = Counter()
-    buffer_q = mp.SimpleQueue()
     replay_buffer = ReplayBuffer(obs_dim=obs_dim, size=args.replay_size)
     training_buffer = ReplayBuffer(obs_dim=obs_dim, size=args.replay_size)
 
@@ -142,40 +142,44 @@ if __name__ == '__main__':
         E.set(e)
         print("load training indicator")
 
-
     glod_model = None
     glod_lower = None
     glod_upper = None
     last_updated = 0
+    last_saved = 0
+    tested_e = 0
     if args.cuda:
         global_ac.to(device)
         global_ac_targ.to(device)
         if args.cpc:
             global_cpc.to(device)
-            global_cpc.share_memory()
-    global_ac.share_memory()
-    global_ac_targ.share_memory()
+
     for p in global_ac_targ.parameters():
         p.requires_grad = False
 
     var_counts = tuple(count_vars(module) for module in [global_ac.pi, global_ac.q1, global_ac.q2])
     print('\nNumber of parameters: \t pi: %d, \t q1: %d, \t q2: %d\n' % var_counts)
 
+    buffer_q = mp.SimpleQueue()
+    model_q = mp.SimpleQueue()
+    test_q = mp.SimpleQueue()
     processes = []
     # Process 0 for evaluation
-    for rank in range(args.n_process+4): # 4 test process
-        if rank == 0:
-            p = mp.Process(target=test_func, args=(global_ac, rank, E, TESTING, "Non-station", args,device,tensorboard_dir))
-        elif rank < 4:
-            p = mp.Process(target=test_func, args=(global_ac, rank, E, TESTING, args.list[(rank-1) % len(args.list)], args, device, tensorboard_dir))
-        else:
-            p = mp.Process(target=sac, args=(global_ac, rank, E, args,  buffer_q,device,tensorboard_dir))
+    for rank in range(args.n_process): # 4 test process
+        model_q.put(shared_ac.state_dict())
+        # Test during training
+        # if rank == 0:
+        #     p = mp.Process(target=test_func, args=(test_q, rank, E, "Non-station", args, torch.device("cpu"),tensorboard_dir))
+        # elif rank < 4:
+        #     p = mp.Process(target=test_func, args=(test_q, rank, E, args.list[(rank-1) % len(args.list)], args, torch.device("cpu"), tensorboard_dir))
+        # else:
+        #     p = mp.Process(target=sac, args=(model_q, rank, E, args,  buffer_q, torch.device("cpu"), tensorboard_dir))
+        p = mp.Process(target=sac, args=(model_q, rank, E, args, buffer_q, torch.device("cpu"), tensorboard_dir))
         p.start()
         if not args.exp_name == "test":
-            time.sleep(5)
+            time.sleep(10)
         processes.append(p)
 
-    tested_e = 0
     while E.value() <= args.episode:
         # receive data from actors
         # print("Going to read data from ACTOR......")
@@ -189,7 +193,7 @@ if __name__ == '__main__':
             replay_buffer.store(o, a, r, o2, d, p2)
             training_buffer.store(o, a, r, o2, d, p2)
         else:
-            obs_glod_score = retrieve_scores(glod_model, np.expand_dims(o, axis=0), device=device, k=args.ood_K)
+            obs_glod_score = retrieve_scores(glod_model, np.expand_dims(o, axis=0), device=torch.device("cpu"), k=args.ood_K)
             if glod_lower <= obs_glod_score <= glod_upper:
                 training_buffer.store(o, a, r, o2, d, p2)
             replay_buffer.store(o, a, r, o2, d, p2)
@@ -198,18 +202,18 @@ if __name__ == '__main__':
         t = T.value()
         e = E.value()
 
-        # OOD update stage
+        # OOD update stage, can only use CPU as the GPU memory can not hold so much data
         if e >= args.ood_starts and e % args.ood_update_rounds == 0 and args.ood and e != last_updated:
-            print(" OOD updating at rounds {}".format(e))
+            print("OOD updating at rounds {}".format(e))
             print("Replay Buffer Size: {}, Training Buffer Size: {}".format(replay_buffer.size, training_buffer.size))
             glod_idxs = np.random.randint(0, training_buffer.size, size=int(training_buffer.size * args.ood_train_per))
             glod_input = training_buffer.obs_buf[glod_idxs]
             glod_target = training_buffer.act_buf[glod_idxs]
             ood_train = (glod_input, glod_target)
-            glod_model = convert_to_glod(global_ac.pi, train_loader=ood_train, hidden_dim=args.hid, act_dim=act_dim,
-                                         device=device)
+            glod_model = deepcopy(global_ac.pi).cpu()
+            glod_model = convert_to_glod(glod_model, train_loader=ood_train, hidden_dim=args.hid, act_dim=act_dim, device=torch.device("cpu"))
             training_buffer = deepcopy(replay_buffer)
-            glod_scores = retrieve_scores(glod_model, replay_buffer.obs_buf[:training_buffer.size], device=device,
+            glod_scores = retrieve_scores(glod_model, replay_buffer.obs_buf[:training_buffer.size], device=torch.device("cpu"),
                                           k=args.ood_K)
             glod_scores = glod_scores.detach().cpu().numpy()
             glod_p2 = training_buffer.p2_buf[:training_buffer.size]
@@ -225,19 +229,6 @@ if __name__ == '__main__':
                        os.path.join(args.save_dir, args.exp_name, "glod_info_{}".format(e)))
             last_updated = e
 
-        # if sum(TESTING) > 0:
-        #     print("In the TESTING stage, pause the training processes...")
-        #     time.sleep(3)
-        #     continue
-        #
-        # # enter the testing phase and pause the training
-        # if e > 0 and e % args.test_every == 0 and tested_e != e:
-        #     print("TEST START")
-        #     for i in range(4):
-        #         TESTING[i] = 1
-        #     tested_e = e
-        #     continue
-
         # SAC Update handling
         if e >= args.update_after and t % args.update_every == 0:
             batch = training_buffer.sample_trans(args.batch_size, device=device)
@@ -251,7 +242,6 @@ if __name__ == '__main__':
             loss_q.backward()
 
             # Next run one gradient descent step for pi.
-
             loss_pi, entropy = global_ac.compute_loss_pi(batch, alpha)
             loss_pi.backward()
 
@@ -269,14 +259,27 @@ if __name__ == '__main__':
             with torch.no_grad():
                 for p, p_targ in zip(global_ac.parameters(), global_ac_targ.parameters()):
                     p_targ.data.copy_((1 - args.polyak) * p.data + args.polyak * p_targ.data)
+
             writer.add_scalar("training/pi_loss", loss_pi.detach().item(), t)
             writer.add_scalar("training/q_loss", loss_q.detach().item(), t)
             writer.add_scalar("training/alpha_loss", alpha_loss.detach().item(), t)
             writer.add_scalar("training/entropy", entropy.detach().mean().item(), t)
 
+        # deliver the model and save
+        if e % args.save_freq == 0 and e > 0 and e != last_saved:
+            temp = copy.deepcopy(global_ac).cpu()
+            shared_ac_state_dict = copy.deepcopy(temp.state_dict())
+            for _ in range(args.n_process):
+                model_q.put(shared_ac_state_dict,)
+            torch.save(global_ac.state_dict(), os.path.join(args.save_dir, args.exp_name, "model_torch_{}".format(e)))
+            state_dict_trans(global_ac.state_dict(), os.path.join(args.save_dir, args.exp_name,  "model_numpy_{}".format(e)))
+            # torch.save((e, t, list(scores), list(wins)), os.path.join(args.save_dir, args.exp_name, "model_data_{}".format(e)))
+            print("Saving model at episode:{}".format(t))
+            last_saved = e
 
-        if e % args.save_freq == 0 and e > 0 and t >= args.update_after:
-            torch.save(global_ac.state_dict(), os.path.join(args.save_dir, args.exp_name, args.model_para))
-            state_dict_trans(global_ac.state_dict(), os.path.join(args.save_dir, args.exp_name, args.numpy_para))
-            # torch.save((e, t), os.path.join(args.save_dir, args.exp_name, args.train_indicator))
-            print("Saving model at episode:{}".format(e))
+        # if e > 0 and e % args.test_every == 0 and tested_e != e:
+        #     temp = copy.deepcopy(global_ac).cpu()
+        #     shared_ac_state_dict = copy.deepcopy(temp.state_dict())
+        #     for _ in range(4):
+        #         test_q.put(shared_ac_state_dict,)
+        #     tested_e = e

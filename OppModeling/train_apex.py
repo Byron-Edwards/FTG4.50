@@ -2,11 +2,12 @@ import os
 import gym
 import numpy as np
 import torch
+from copy import deepcopy
 from torch.utils.tensorboard import SummaryWriter
 from OppModeling.atari_wrappers import make_ftg_ram,make_ftg_ram_nonstation
+from OppModeling.SAC import MLPActorCritic
 
-
-def sac(global_ac, rank, E, args, buffer_q, device=None, tensorboard_dir=None,):
+def sac(model_q, rank, E, args, buffer_q, device=None, tensorboard_dir=None,):
     torch.manual_seed(args.seed + rank)
     np.random.seed(args.seed + rank)
     # writer = GlobalSummaryWriter.getSummaryWriter()
@@ -20,6 +21,13 @@ def sac(global_ac, rank, E, args, buffer_q, device=None, tensorboard_dir=None,):
         env = make_ftg_ram_nonstation(args.env, p2_list=args.list, total_episode=args.station_rounds,stable=args.stable)
     else:
         env = make_ftg_ram(args.env, p2=args.p2)
+    obs_dim = env.observation_space.shape[0]
+    act_dim = env.action_space.n
+    ac_kwargs = dict(hidden_sizes=[args.hid] * args.l)
+    if args.cpc:
+        local_ac = MLPActorCritic(obs_dim+args.c_dim, act_dim, **ac_kwargs)
+    else:
+        local_ac = MLPActorCritic(obs_dim, act_dim, **ac_kwargs)
     print("set up child process env")
 
     # Prepare for interaction with environment
@@ -27,10 +35,17 @@ def sac(global_ac, rank, E, args, buffer_q, device=None, tensorboard_dir=None,):
     o, ep_ret, ep_len = env.reset(), 0, 0
     discard = False
     local_t, local_e = 0, 0
+    if not model_q.empty():
+        print("Process {}\tgoing to load new model at beginning......".format(rank))
+        received_obj = model_q.get()
+        model_dict = deepcopy(received_obj)
+        local_ac.load_state_dict(model_dict)
+        print("Process {}\tfinished loading new mode at beginning!!!!!!".format(rank))
+        del received_obj
     # Main loop: collect experience in env and update/log each epoch
     while E.value() <= args.episode:
         with torch.no_grad():
-            a = global_ac.get_action(o, device=device)
+            a = local_ac.get_action(o, device=device)
         # Step the env
         o2, r, d, info = env.step(a)
         if info.get('no_data_receive', False):
@@ -62,7 +77,7 @@ def sac(global_ac, rank, E, args, buffer_q, device=None, tensorboard_dir=None,):
             m_score = np.mean(scores[-100:])
             win_rate = np.mean(wins[-100:])
             print(
-                "Process {}, opponent:{}, # of global_episode :{}, round score: {}, mean score : {:.1f}, win_rate:{}, steps: {}".format(
+                "Process\t{}\topponent:{},\t# of global_episode :{},\tround score: {},\tmean score : {:.1f},\twin_rate:{},\tsteps: {}".format(
                     rank, args.p2, e, ep_ret, m_score, win_rate, ep_len))
             writer.add_scalar("actor/round_score", ep_ret, e)
             writer.add_scalar("actor/mean_score", m_score.item(), e)
@@ -70,4 +85,11 @@ def sac(global_ac, rank, E, args, buffer_q, device=None, tensorboard_dir=None,):
             writer.add_scalar("actor/round_step", ep_len, e)
             o, ep_ret, ep_len = env.reset(), 0, 0
             discard = False
+            if not model_q.empty():
+                print("Process {}\tgoing to load new model at EPISODE {}......".format(rank, e))
+                received_obj = model_q.get()
+                model_dict = deepcopy(received_obj)
+                local_ac.load_state_dict(model_dict)
+                print("Process {}\tfinished loading new mode at EPISODE {}!!!!!!".format(rank, e))
+                del received_obj
 
