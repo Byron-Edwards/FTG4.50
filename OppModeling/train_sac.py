@@ -87,7 +87,7 @@ def sac(global_ac, global_ac_targ, rank, T, E, args, scores, wins, buffer_q, dev
             replay_buffer.store(o, a, r, o2, d, str(p2))
             training_buffer.store(o, a, r, o2, d, str(p2))
         else:
-            obs_glod_score = retrieve_scores(glod_model, np.expand_dims(o, axis=0), device=device, k=args.ood_K)
+            obs_glod_score = retrieve_scores(glod_model, np.expand_dims(o, axis=0), device=torch.device("cpu"), k=args.ood_K)
             if glod_lower <= obs_glod_score <= glod_upper:
                 training_buffer.store(o, a, r, o2, d, str(p2))
             replay_buffer.store(o, a, r, o2, d, str(p2))
@@ -134,21 +134,20 @@ def sac(global_ac, global_ac_targ, rank, T, E, args, scores, wins, buffer_q, dev
             writer.add_scalar("metrics/round_step", ep_len, e)
             writer.add_scalar("metrics/alpha", alpha, e)
             o, ep_ret, ep_len = env.reset(), 0, 0
-            trajectory = list()
             discard = False
 
         # OOD update stage, can only use CPU as the GPU memory can not hold so much data
         if e >= args.ood_starts and e % args.ood_update_rounds == 0 and args.ood and e != last_updated:
-            print(" OOD updating at rounds {}".format(e))
+            print("OOD updating at rounds {}".format(e))
             print("Replay Buffer Size: {}, Training Buffer Size: {}".format(replay_buffer.size, training_buffer.size))
             glod_idxs = np.random.randint(0, training_buffer.size, size=int(training_buffer.size * args.ood_train_per))
             glod_input = training_buffer.obs_buf[glod_idxs]
             glod_target = training_buffer.act_buf[glod_idxs]
             ood_train = (glod_input, glod_target)
-            glod_model = convert_to_glod(global_ac.pi, train_loader=ood_train, hidden_dim=args.hid, act_dim=act_dim,
-                                         device=device)
+            glod_model = deepcopy(global_ac.pi).cpu()
+            glod_model = convert_to_glod(glod_model, train_loader=ood_train, hidden_dim=args.hid, act_dim=act_dim, device=torch.device("cpu"))
             training_buffer = deepcopy(replay_buffer)
-            glod_scores = retrieve_scores(glod_model, replay_buffer.obs_buf[:training_buffer.size], device=device,
+            glod_scores = retrieve_scores(glod_model, replay_buffer.obs_buf[:training_buffer.size], device=torch.device("cpu"),
                                           k=args.ood_K)
             glod_scores = glod_scores.detach().cpu().numpy()
             glod_p2 = training_buffer.p2_buf[:training_buffer.size]
@@ -160,14 +159,15 @@ def sac(global_ac, global_ac_targ, rank, T, E, args, scores, wins, buffer_q, dev
                 training_buffer.ood_drop(reserved_indexes)
             writer.add_histogram(values=glod_scores, max_bins=300, global_step=e, tag="OOD")
             print("Replay Buffer Size: {}, Training Buffer Size: {}".format(replay_buffer.size, training_buffer.size))
-            torch.save((glod_scores, glod_p2),os.path.join(args.save_dir, args.exp_name, "glod_info_{}".format(e)))
+            torch.save((glod_scores, replay_buffer.p2_buf[:replay_buffer.size]),
+                       os.path.join(args.save_dir, args.exp_name, "glod_info_{}".format(e)))
             last_updated = e
 
         # SAC Update handling
         if local_e >= args.update_after and local_t % args.update_every == 0:
             for j in range(args.update_every):
 
-                batch = replay_buffer.sample_trans(args.batch_size,device=device)
+                batch = training_buffer.sample_trans(args.batch_size,device=device)
                 # First run one gradient descent step for Q1 and Q2
                 q1_optimizer.zero_grad()
                 q2_optimizer.zero_grad()
