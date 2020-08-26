@@ -61,7 +61,7 @@ class ReplayBuffer:
         self.p2_buf[:reserved_len] = self.p2_buf[reserved_indexes]
         self.p2_buf[reserved_len:] = 0
         self.size = min(reserved_len, self.max_size)
-        self.ptr = self.size
+        self.ptr = self.size % self.max_size
         print("after ood drop: {}".format(self.size))
 
     def is_full(self):
@@ -163,5 +163,5 @@ class ReplayBufferOppo:
         print("updated latents")
 
     def is_full(self):
-        return self.size == self.max_size
+        return len(self.trajectories) == self.max_size
 
