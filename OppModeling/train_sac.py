@@ -157,11 +157,11 @@ def sac(global_ac, global_ac_targ, rank, T, E, args, scores, wins, buffer_q, dev
             reserved_indexes = np.argwhere(mask).flatten()
             if len(reserved_indexes) > 0:
                 training_buffer.ood_drop(reserved_indexes)
-            writer.add_histogram(values=glod_scores, max_bins=300, global_step=e, tag="OOD")
+            writer.add_histogram(values=glod_scores, max_bins=300, global_step=local_e, tag="OOD")
             print("Replay Buffer Size: {}, Training Buffer Size: {}".format(replay_buffer.size, training_buffer.size))
             torch.save((glod_scores, replay_buffer.p2_buf[:replay_buffer.size]),
-                       os.path.join(args.save_dir, args.exp_name, "glod_info_{}".format(e)))
-            last_updated = e
+                       os.path.join(args.save_dir, args.exp_name, "glod_info_{}_{}".format(rank, local_e)))
+            last_updated = local_e
 
         # SAC Update handling
         if local_e >= args.update_after and local_t % args.update_every == 0:
