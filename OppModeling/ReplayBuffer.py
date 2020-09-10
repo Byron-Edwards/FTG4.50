@@ -67,9 +67,7 @@ class ReplayBuffer:
     def is_full(self):
         return self.size == self.max_size
 
-
-
-
+# not used
 class ReplayBufferShare:
     """
     A simple FIFO experience replay buffer for shared memory.

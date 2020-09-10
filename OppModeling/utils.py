@@ -4,8 +4,6 @@ import torch
 import torch.multiprocessing as mp
 import torch.nn as nn
 
-
-
 DarkBlue = '#051c2c'
 LightBlue = '#3ba9f5'
 LightGrey = '#989898'
@@ -16,6 +14,7 @@ Green = '#009926'
 colors = [Blue, Green, Orange, LightGrey, LightBlue]
 
 
+# used for loading different model parameters, use it carefully
 def load_my_state_dict(model, saved_state):
     pretrained_dict = torch.load(saved_state)
     model_dict = model.state_dict()

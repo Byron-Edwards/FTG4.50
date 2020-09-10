@@ -173,7 +173,7 @@ class ScheduledOptim(object):
             param_group['lr'] = new_lr
         return new_lr
 
-
+# not used
 def main():
     # Settings
     parser = argparse.ArgumentParser(description='PyTorch MNIST Example')
@@ -237,20 +237,19 @@ def main():
         # Train and validate
         # trainXXreverse(args, model, device, train_loader, optimizer, epoch, args.batch_size)
         # val_acc, val_loss = validationXXreverse(args, model, device, validation_loader, args.batch_size)
-        train(args, model, device, train_loader, optimizer, epoch, args.batch_size)
-        val_acc, val_loss = validation(args, model, device, validation_loader, args.batch_size)
+        # train(args, model, device, train_loader, optimizer, epoch, args.batch_size)
+        # val_acc, val_loss = validation(args, model, device, validation_loader, args.batch_size)
 
         # Save
-        if val_acc > best_acc:
-            best_acc = max(val_acc, best_acc)
-            # TODO add save functions
-            best_epoch = epoch + 1
-        elif epoch - best_epoch > 2:
-            optimizer.increase_delta()
-            best_epoch = epoch + 1
-
-        end_epoch_timer = timer()
-        logging.info("#### End epoch {}/{}, elapsed time: {}".format(epoch, args.epochs, end_epoch_timer - epoch_timer))
+        # if val_acc > best_acc:
+        #     best_acc = max(val_acc, best_acc)
+        #     best_epoch = epoch + 1
+        # elif epoch - best_epoch > 2:
+        #     optimizer.increase_delta()
+        #     best_epoch = epoch + 1
+        #
+        # end_epoch_timer = timer()
+        # logging.info("#### End epoch {}/{}, elapsed time: {}".format(epoch, args.epochs, end_epoch_timer - epoch_timer))
 
     ## end
     end_global_timer = timer()
@@ -259,8 +258,6 @@ def main():
 
 
 if __name__ == '__main__':
-    ############ Control Center and Hyperparameter ###############
-    # TODO add the unit test for CPC only, try on the mnist data set
     run_name = "cdc" + time.strftime("-%Y-%m-%d_%H_%M_%S")
     print(run_name)
     main()

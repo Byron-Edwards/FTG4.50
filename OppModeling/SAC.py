@@ -71,7 +71,7 @@ class MLPActorCritic(nn.Module):
         q_pi = torch.min(q1_pi, q2_pi)
 
         # Entropy-regularized policy loss
-        loss_pi = (a_prob * (alpha * log_a_prob - q_pi)).mean()
+        loss_pi = (a_prob * (alpha * log_a_prob - q_pi)).sum(dim=1).mean()
         entropy = torch.sum(log_a_prob * a_prob, dim=1)
 
         # Useful info for logging

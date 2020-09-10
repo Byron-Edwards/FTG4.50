@@ -1,18 +1,63 @@
+
+
 # FigthingICE Introduction
 
 [Office Website](http://www.ice.ci.ritsumei.ac.jp/~ftgaic/index.htm)
 
+This repo is used for the training of the submitted agent **ButcherPudeg** and the further research on the opponent modeling.
+
+Repo Structure:
+
+```python
+.
+├── Archived # it contains the backup for other algorithm i used before.
+├── Docker # contains the Dockerfile to build up image to run the game and algorithm
+├── evaluation_offline.py 
+├── Gym-FightingICE # This repo need to clone from another address
+├── OOD # OOD related alogritm
+├── OOD_sample_visual.py 
+├── OpenAI # the submitted agent and parameter for the competition
+├── OppModeling # contains algorithm related with SAC,CPC etc.
+├── README.md # this readme
+├── RHEA_PI_Evolution.png # picture for readme
+├── RHEA_PI_initialization.png # picture for readme
+├── SAC_async.py # async version for SAC
+├── SAC_evaluation.py # evaluation for SAC using OOD and CPC
+├── SAC_single.py # SAC alogrithm
+```
+
+## Installation
+
+Dependency:
+```bash
+apt-get install -y openjdk-8-jdk #openjdk11 should also work
+pip install gym py4j port_for opencv-python tensorboard numpy 
+# install pytorch according to your python and cuda version
+# In order to run the game, the server requires Display, Sound and input devices and OpenGL for rendering. if you do not have a physical one, please refer to the Docker/DockerFile to see how to build up virtule devices or docker images
+```
+
+Build up runnable working folder for training
+```bash
+1. git clone https://github.com/Byron-Edwards/FTG4.50.git
+2. wget http://www.ice.ci.ritsumei.ac.jp/~ftgaic/Downloadfiles/FTG4.50.zip
+3. unzip FTG4.50.zip
+4. cd FTG4.50/
+5. git clone (https://github.com/Byron-Edwards/Gym-FightingICE.git)
+6. cd Gym-FightingICE
+7. git checkout competition
+8. pip install -e .
+```
+
 ## Game mechanics
 
-- Game core written in Java and also wrapped for python by py4j
-- Game is played asynchronously in real time.
-- Game runs in 60fps, each frame take 16.66ms. AI need to finish calculation and make action within this time interval
-- 15 frames delay are introduced if using the raw frame data, no delay if using visual (pixel) data
-- Each game contains 3 rounds, each rounds take at most 60s. Each character has 400 initial HP. After each round, the characters' positions and HPs will be reset
-- If an input from the AI is not passed, Game will consider the AI's last input as a new input. For example, if AI has used 22ms to decide its input based on the previous frame's information, it will only have 11.34ms (16.67 * 2 - 22) left to make its decision with the latest game situation, with a delay of 15 frames
+- Game is written in Java and also wrapped for python by py4j
+- Game can run in both **Fastmode** and **non-Fastmode**. In fast mode, game will wait for the output from both AIs and has no limitation on the FPS, while in the non-fastmode, game will run in 60FPS and will not wait for the output from Both AIs. **fastmode** can be used for training and **non-fastmode** is used for the competition (**WARNING: game might encounter deadlock when run parallel in fastmode**)
+- In the **Non-fastmode** If an output from the AI is not sent, Game will consider the AI's last input as a new input. For example, if AI has used 22ms to decide its input based on the previous frame's information, it will only have 11.34ms (16.67 * 2 - 22) left to make its decision with the latest game situation, with a delay of 15 frames.
+- Game can send both RAM data or pixel data, 15 frames delay are introduced if using the RAM data, no delay if using visual (pixel) data
+- In the standard competition, Each game contains 3 rounds, each rounds take at most 60s. Each character has 400 initial HP. After each round, the characters' positions and HPs will be reset. Both of these parameters can be modified if needed.
+
 
 For more details about this Fighint Game mechanics, please refer to
-
 1. [Introduction of the game flow](http://www.ice.ci.ritsumei.ac.jp/~ftgaic/Downloadfiles/Introduction%20of%20the%20game%20flow.pdf)
 2. [Information about the character](http://www.ice.ci.ritsumei.ac.jp/~ftgaic/Downloadfiles/Information%20about%20the%20character.pdf)
 3. [Information about the combo system](http://www.ice.ci.ritsumei.ac.jp/~ftgaic/Downloadfiles/ComboSystem.pdf)
@@ -32,10 +77,11 @@ For more details about this Fighint Game mechanics, please refer to
 
 ## Action Space
 
-When the character is on ground, all AIR actions will be considered invalid by the simulator. Likewise, all GROUND actions are considered invalid if the character is in air. There are total 56 actions avaiable.
+When the character is on ground, all AIR actions will be considered invalid by the simulator. Likewise, all GROUND actions are considered invalid if the character is in air. There are total 56 actions in the Game. However some of 56 actions can not be activly conduct by the agent, e.g. `14:AIR_GUARD_RECOV`, this is the action indicates the agent is recovering from the air_gurad action.
 
+All Avaible Actions, comment out action are useless
 ```python
-0:AIR
+#0:AIR
 1:AIR_A
 2:AIR_B
 3:AIR_D_DB_BA
@@ -49,14 +95,14 @@ When the character is on ground, all AIR actions will be considered invalid by t
 11:AIR_FA
 12:AIR_FB
 13:AIR_GUARD
-14:AIR_GUARD_RECOV
-15:AIR_RECOV
+#14:AIR_GUARD_RECOV
+#15:AIR_RECOV
 16:AIR_UA
 17:AIR_UB
 18:BACK_JUMP
 19:BACK_STEP
-20:CHANGE_DOWN
-21:CROUCH
+#20:CHANGE_DOWN
+#21:CROUCH
 22:CROUCH_A
 23:CROUCH_B
 24:CROUCH_FA
@@ -65,14 +111,14 @@ When the character is on ground, all AIR actions will be considered invalid by t
 27:CROUCH_GUARD_RECOV
 28:CROUCH_RECOV
 29:DASH
-30:DOWN
+#30:DOWN
 31:FOR_JUMP
 32:FORWARD_WALK
 33:JUMP
-34:LANDING
+#34:LANDING
 35:NEUTRAL
-36:RISE
-37:STAND
+#36:RISE
+#37:STAND
 38:STAND_A
 39:STAND_B
 40:STAND_D_DB_BA
@@ -85,12 +131,12 @@ When the character is on ground, all AIR actions will be considered invalid by t
 47:STAND_FA
 48:STAND_FB
 49:STAND_GUARD
-50:STAND_GUARD_RECOV
-51:STAND_RECOV
+#50:STAND_GUARD_RECOV
+#51:STAND_RECOV
 52:THROW_A
 53:THROW_B
-54:THROW_HIT
-55:THROW_SUFFER
+#54:THROW_HIT
+#55:THROW_SUFFER
 ```
 
 For details please refer to [Action.java](https://github.com/TeamFightingICE/FightingICE/blob/master/src/enumerate/Action.java)
@@ -168,7 +214,7 @@ For the details please refer to [FrameData.java](https://github.com/TeamFighting
 Obtains RGB data of the screen in the form of ByteBuffer. **Note: If the window is disabled, will just return a black buffer**
 Details please refer to [ScreenData.java](https://github.com/TeamFightingICE/FightingICE/blob/master/src/struct/ScreenData.java#L22).
 
-## Gym Encapsulation
+## OpenAI Gym Encapsulation
 
 Overall introduction of this Gym env please refer to [gym-fightingice](https://github.com/TeamFightingICE/Gym-FightingICE)
 
@@ -181,17 +227,17 @@ Overall introduction of this Gym env please refer to [gym-fightingice](https://g
 
 The envs with "Data" returns a vector of game data with a delay of 15 frames as obs;
 The envs with "Display" returns an ndarray with no frame delay as obs, but FightingICE will run slower in this mode.
-The envs with "Frameskip"
+The envs with "Frameskip" will skip the action processing if not meet certain requirement e.g. agent is not under control (passivly or actively)
 
 ### Gym Action Space
 
-same as the java one, contains **56** actions
+same as the java one, contains **56** actions. For training, you can removed some useless actions
 
 ### Gym Observation Space
 
 #### Data Envs
 
-If using the "Data" envs, it will return totally **143** processed data from FrameData. The following code show same example
+If using the "Data" envs, it will return totally **143** processed data from FrameData. The following code show same example. You can modified this if you want different data from the game.
 
 ```python
 my = self.frameData.getCharacter(self.player)
@@ -227,11 +273,11 @@ Basically the current gym Encapsulation only returned a simplified obs data from
 
 #### Display Envs
 
-The original display data is same as java one. In this gym Encapsulation it receive the gray rescaled image of size (96,64,1). Here still need to enable the window to receive the correct pixel data.
+The original display data is same as java one. In this gym Encapsulation it receive the gray rescaled image of size (96,64,1). The pixel data need to enable the graphic rendering
 
 ## AI Inferface
 
-For both Java and Python implementation, the AI need to extend/implement the interface of AIIInterface. The major task for AI is to calculate the **best action**  according to the **observation**.
+For both Java and Python implementation, the AI need to extend/implement the interface of AIIInterface. The major task for AI is to calculate the **best action** according to the **observation**.
 
 ```java
 public interface AIInterface {
@@ -263,7 +309,7 @@ ReiwaThunder implements 6 Seperate AI controllers to deal with 6 different leagu
 - Garnet SpeedRunning
 - default MyAI.
 
-ReiwaThunder using simlulator to address the 15 frames delay, which means it using the delayed framedata (which is the data 15 frames ago) to simulate the current framedata. Then perform calculation on the simulated framedata.
+ReiwaThunder uses simlulator to address the 15 frames delay, which means it using the delayed framedata to simulate the current framedata, then performs calculation on the simulated framedata.
 
 Although there are 6 different implementations, the overall `doAct()` method in `processing` to get the best action in each frame is similar. Take `UseZenAI` as an example
 
@@ -287,15 +333,15 @@ The above is the overall description of the ReiwaThunder Zen Standard AI, the di
 
 #### Conclusion
 
-ReiwaThunder implemented fine-grained AIs to optimize the performance in different leagues. Each individual AI is more like a rule based one with MinMax and MCTS algorithm to search in limited depth. They are overall excellent agents but not general game AI. 
-This implementation requires the author to be very familiar with the game and have a deep understanding on the game mechanics.
+ReiwaThunder implemented fine-grained AIs to optimize the performance in different leagues. Each individual AI is more like a rule based one with MinMax to search in limited depth. They are overall excellent agents but not general game AI. 
+This implementation requires strong domain knowledge on the fighting game and a deep understanding on the mechanics of this game.
 
 ### Second Place: RHEA_PI
 
 #### AI implementation
 
-The RHEA_PI agent is an general game AI, it using Rolling Horizen Evolutionary Algorithm (RHEA) combined with a opponent model to select the best action for 6 leagues. 
-RHEA_PI also take reference from Thunder (The previous version of RewiaThunder), It also using the simulator to simulate 14 frameData to address the delay problem and divdide the actions into `actionGround`, `actionAir`, `myActionsEnoughEnergy`, `oppActionsEnoughEnergy`. 
+The RHEA_PI agent is a general game AI, it uses Rolling Horizen Evolutionary Algorithm (RHEA) combined with a opponent model to select the best action for 6 leagues. 
+RHEA_PI also take reference from Thunder (The previous version of RewiaThunder), It uses the simulator to simulate 14 frameData to address the delay problem
 
 While under some special conditions it will also return certain actions directly , for example
 
@@ -332,8 +378,4 @@ For the later frames, each `Gene` of an `Inidividual` will pop the first action 
 4. Output: Probabilities of opponent actions. In the prediction, the result will filtered the invalid action.
 
 #### Conclusion
-RHEA_PI is a general AI for the FightingICE, partially take reference from the **Thunder** to handle special conditions. RHEA_PI used single layer neural network to predict the opponent action and implemented Rolling Horizen Evolutionary Algorithm to perform best action for each frame. I think we can take this implementation as an example to sovle the oppenment model problem
-
-### Third Place Toothless
-
-To be Continued...
+RHEA_PI is a general AI for the FightingICE, partially take reference from the **Thunder** to handle special conditions. RHEA_PI used single layer neural network to predict the opponent action and implemented Rolling Horizen Evolutionary Algorithm to perform best action for each frame.
