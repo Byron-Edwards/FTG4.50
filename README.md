@@ -42,8 +42,8 @@ Build up runnable working folder for training
 2. wget http://www.ice.ci.ritsumei.ac.jp/~ftgaic/Downloadfiles/FTG4.50.zip
 3. unzip FTG4.50.zip
 4. cd FTG4.50/
-5. git clone (https://github.com/Byron-Edwards/Gym-FightingICE.git)
-6. cd Gym-FightingICE
+5. git clone https://github.com/Byron-Edwards/Gym-FightingICE.git
+6. cd Gym-FightingICE/
 7. git checkout competition
 8. pip install -e .
 ```
