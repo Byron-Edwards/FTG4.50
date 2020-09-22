@@ -10,7 +10,6 @@ from gym import spaces
 os.environ.setdefault('PATH', '')
 cv2.ocl.setUseOpenCL(False)
 
-
 class timeout:
     def __init__(self, seconds=1, error_message='Timeout'):
         self.seconds = seconds
