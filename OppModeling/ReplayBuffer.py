@@ -1,7 +1,9 @@
 import torch
 import random
 import numpy as np
+import multiprocessing as mp
 from OppModeling.utils import combined_shape
+from OppModeling.DTW import accelerated_dtw
 
 
 class ReplayBuffer:
@@ -68,8 +70,6 @@ class ReplayBuffer:
         return self.size == self.max_size
 
 
-
-
 class ReplayBufferShare:
     """
     A simple FIFO experience replay buffer for shared memory.
@@ -102,27 +102,88 @@ class ReplayBufferShare:
 
 
 class ReplayBufferOppo:
-    # for single thread or created in the child thread
-    def __init__(self, max_size, encoder, obs_dim):
+    def __init__(self, max_size, obs_dim, cpc=False, forget_percent=0.2, cpc_model=None, writer=None):
         self.trajectories = list()
+        self.latents = list()
         self.traj_len = list()
-        self.encoder = encoder
+        self.meta = list()
         self.obs_dim = obs_dim
-        self.c_dim = self.encoder.c_dim
+        self.size = 0
+        self.writer = writer
+        self.cpc = cpc
+        self.cpc_model = cpc_model
+        self.forget_percent = forget_percent
         self.max_size = max_size
 
-    def store(self, trajectory):
+    def store(self, trajectory, latents=None, meta=None):
+        while self.size + len(trajectory) >= self.max_size:
+            self.forget()
         self.trajectories.append(trajectory)
         self.traj_len.append(len(trajectory))
-        if len(self.trajectories) >= self.max_size:
-            self.forget()
+        if self.cpc:
+            self.meta.append(meta)
+            self.latents.append(latents)
+        self.size += len(trajectory)
 
     def forget(self):
-        self.trajectories.pop(0)
-        self.traj_len.pop(0)
+        if not self.cpc:
+            self.trajectories.pop(0)
+            self.size -= self.traj_len.pop(0)
+        else:
 
-    def cluster(self):
-        pass
+            self.trajectories.pop(0)
+            self.meta.pop(0)
+            self.latents.pop(0)
+            self.size -= self.traj_len.pop(0)
+            # self.create_latents()
+            # distance_matrix = self.latent_distance()
+            # closest_k = int(len(self.latents) * self.forget_percent)
+            # ind =np.argpartition(distance_matrix, closest_k, axis=1)[:,:closest_k]
+            # kmean_dis = distance_matrix.take(ind).mean(axis=1)
+            # remove_index = np.argpartition(kmean_dis, closest_k, axis=-1)[:closest_k]
+            # remove_index = np.sort(remove_index)[::-1]
+            # for index in remove_index:
+            #     del self.trajectories[index]
+            #     del self.latents[index]
+            #     del self.meta[index]
+            #     self.size -= self.traj_len.pop(index)
+
+    def create_latents(self, e):
+        assert self.cpc_model is not None
+        assert self.writer is not None
+        latents = list()
+        all_embeddings = list()
+        for trajectory in self.trajectories:
+            obs = [tran[0] for tran in trajectory]
+            c_hidden = self.cpc_model.init_hidden(1, self.cpc_model.c_dim)
+            traj_c, c_hidden = self.cpc_model.predict(obs, c_hidden)
+            latents.append(traj_c.squeeze().cpu().numpy())
+            all_embeddings += traj_c.squeeze().tolist()
+        # if want to directly delete the elements, latents need to be a list
+        self.latents = latents
+        flat_meta = list()
+        for meta_traj in self.meta:
+            for meta in meta_traj:
+                flat_meta.append(meta)
+        self.writer.add_embedding(mat=np.array(all_embeddings), metadata=flat_meta,global_step=e,
+                             metadata_header=["opponent", "rank", "round", "step", "reward", "action", ])
+
+    def latent_distance(self):
+        distance_matrix = np.empty((len(self.latents), len(self.latents),))
+        distance_matrix[:] = np.nan
+        seq = [(self.latents[i], self.latents[j]) for i in range(len(self.latents)) for j in range(i)]
+        with mp.Pool() as p:
+            distances = p.starmap(worker, seq)
+        index = 0
+        for i in range(len(self.latents)):
+            for j in range(i+1):
+                if np.isnan(distance_matrix[i][j]):
+                    if i == j:
+                        distance_matrix[i][j] = 0
+                    else:
+                        distance_matrix[i][j] = distance_matrix[j][i] = distances[index]
+                        index += 1
+        return distance_matrix
 
     def sample_trans(self, batch_size, device=None):
         indexes = np.arange(len(self.trajectories))
@@ -133,15 +194,15 @@ class ReplayBufferOppo:
             sampled_trans.append(random.choice(self.trajectories[index]))
         obs_buf, obs2_buf, act_buf, rew_buf, done_buf = [], [], [], [], []
         for trans in sampled_trans:
-            obs_buf.append(np.concatenate((trans[0], trans[-2]), axis=0))   # o1 + c1
-            obs2_buf.append(np.concatenate((trans[3], trans[-1]), axis=0))  # o2 + c2
+            obs_buf.append(trans[0])
+            obs2_buf.append(trans[3])
             act_buf.append(trans[1])
             rew_buf.append(trans[2])
             done_buf.append(trans[4])
         batch = dict(obs=obs_buf, obs2=obs2_buf, act=act_buf, rew=rew_buf, done=done_buf)
         return {k: torch.as_tensor(v, dtype=torch.float32).to(device) for k, v in batch.items()}
 
-    # This function sample batch of trace  for  CPC training, only return the batch of obs
+    # This function sample batch of trace for CPC training, only return the batch of obs
     def sample_traj(self, batch_size):
         indexes = np.random.randint(len(self.trajectories), size=batch_size)
         min_len = min([self.traj_len[i] for i in indexes])
@@ -158,10 +219,20 @@ class ReplayBufferOppo:
     def update_latent(self, indexes, min_len, latents):
         for i, index in enumerate(indexes):
             for j in range(min_len):
-                self.trajectories[index][j][-2] = latents[i][j].cpu().numpy() # update c1
+                self.trajectories[index][j][-2] = latents[i][j].cpu().numpy()  # update c1
                 self.trajectories[index][j][-1] = latents[i][j+1].cpu().numpy()   # update c2
         print("updated latents")
 
     def is_full(self):
-        return len(self.trajectories) == self.max_size
+        return self.size >= self.max_size
 
+    def __len__(self):
+        return self.size
+
+    def load_factor(self):
+        return self.size / self.max_size
+
+
+def worker(latent1, latent2):
+    dis, _, _, _ = accelerated_dtw(latent1, latent2, dist="euclidean")
+    return dis
